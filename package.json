@@ -1,0 +1,22 @@
+{
+  "name": "reading-notes-demo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node tests/textPolish.test.js && node tests/bookUtils.test.js && node tests/domain.test.js && node tests/db.test.js && node tests/backup.test.js && node tests/ebookParser.test.js",
+    "check": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^6.2.108",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  }
+}
