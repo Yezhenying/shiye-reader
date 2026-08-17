@@ -12,9 +12,10 @@ assert.equal(ebookTestUtils.resolveZipPath('OPS/package.opf', 'text/chapter.xhtm
 const textBook = await parseEbookFile(new File(['第一章\n\n测试内容。'], '测试书.txt', { type: 'text/plain' }));
 assert.equal(textBook.title, '测试书');
 assert.equal(textBook.format, 'TXT');
-assert.match(textBook.parseStatus, /全文已解析/);
+assert.match(textBook.parseStatus, /UTF-8/);
 assert.equal(textBook.sections.length, 1);
 assert.equal(textBook.sections[0].bookId, undefined);
-assert.equal(textBook.capability, 'FULL');
-
-console.log('ebookParser: 14 assertions passed');
+assert.equal(textBook.capability, 'TEXT_VERIFIED');
+await assert.rejects(() => parseEbookFile(new File(['not pdf'], '伪装.pdf', { type: 'application/pdf' })), /签名不匹配/);
+await assert.rejects(() => parseEbookFile(new File(['not zip'], '伪装.epub', { type: 'application/epub+zip' })), /不是 ZIP 容器/);
+console.log('ebookParser: 16 assertions passed');

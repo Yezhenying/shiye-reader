@@ -1,38 +1,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  commitImport, getAllRecords, getRecord, putMany, putRecord, restoreTrashItem,
-  softDeleteBook, storageStatus,
+  commitLegacyRescue, deleteCategoryAndUnassign, deleteRecord, getAllRecords, putMany, putProgressMonotonic,
+  putRecord, restoreTrashItem, softDeleteBook, softDeleteEntity, storageStatus,
 } from './db.js';
-import { activeRecords, createId, normalizeBook, nowIso } from './domain.js';
-import { normalizeImportedBooks } from './bookUtils.js';
-import { normalizeStoredNotes } from './textPolish.js';
+import { activeRecords, buildLegacyRescueRecords, createId, normalizeBook, nowIso } from './domain.js';
+import { importPublication as commitPublication } from './services/importService.js';
 
-const DATA_STORES = ['books', 'files', 'sections', 'progress', 'notes', 'highlights', 'bookmarks', 'tags', 'categories', 'sessions', 'settings', 'trash'];
+const DATA_STORES = ['books', 'files', 'sections', 'progress', 'notes', 'highlights', 'bookmarks', 'tags', 'categories', 'sessions', 'settings', 'trash', 'drafts'];
 const DEFAULT_CATEGORIES = ['文学与小说', '思想与哲学', '商业与经济', '自然与科学'];
 
-async function checksumBlob(blob) {
-  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
-  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+function parseLegacyArray(key) {
+  const raw = localStorage.getItem(key);
+  if (raw === null || raw === '') return [];
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error(`${key} 不是数组，已保留原始数据等待修复`);
+  return parsed;
 }
 
 async function migrateLegacyStorage() {
-  if (await getRecord('meta', 'legacy-migration-v1')) return;
-  let books = [];
-  let notes = [];
-  try { books = normalizeImportedBooks(JSON.parse(localStorage.getItem('shiyue-books') || '[]')); } catch { /* quarantine by leaving original keys */ }
-  try { notes = normalizeStoredNotes(JSON.parse(localStorage.getItem('shiyue-notes') || '[]')); } catch { /* quarantine by leaving original keys */ }
-  const now = nowIso();
-  const migratedBooks = books.map(book => normalizeBook({ ...book, capability: book.contentPreview ? 'TEXT_ONLY' : 'METADATA_ONLY', createdAt: now, updatedAt: now }));
-  const sections = migratedBooks.flatMap(book => {
-    const original = books.find(item => item.id === book.id);
-    return original?.contentPreview ? [{ id: `section-${book.id}-0`, bookId: book.id, order: 0, title: '旧版预览', text: original.contentPreview, wordCount: original.contentPreview.replace(/\s/g, '').length }] : [];
-  });
-  const migratedNotes = notes.map((note, index) => ({
-    id: note.id || `legacy-note-${index}`, bookId: note.bookId || '', type: note.type || '感悟', content: note.note || '',
-    tagIds: [], legacyTags: note.tags || [], revision: 1, createdAt: now, updatedAt: now, legacyTitle: note.title || '随手记', legacyAuthor: note.author || '',
-  }));
-  await Promise.all([putMany('books', migratedBooks), putMany('sections', sections), putMany('notes', migratedNotes)]);
-  await putRecord('meta', { key: 'legacy-migration-v1', completedAt: now, books: migratedBooks.length, notes: migratedNotes.length });
+  let books; let notes;
+  try {
+    books = parseLegacyArray('shiyue-books');
+    notes = parseLegacyArray('shiyue-notes');
+  } catch (error) {
+    throw new Error(`旧版数据迁移暂停：${error.message}`);
+  }
+  const completedAt = nowIso();
+  const records = buildLegacyRescueRecords(books, notes, completedAt);
+  // Marker and every repaired record commit together. v3 also repairs sections missed by the old non-atomic v2 rescue.
+  await commitLegacyRescue({ markerKey: 'legacy-rescue-v3', ...records, completedAt });
 }
 
 export function useLibrary() {
@@ -41,6 +37,7 @@ export function useLibrary() {
   const [error, setError] = useState('');
   const [storage, setStorage] = useState({ usage: 0, quota: 0, persisted: false });
   const channelRef = useRef(null);
+  const writeSuspendedRef = useRef(false);
 
   const reload = useCallback(async () => {
     try {
@@ -58,36 +55,37 @@ export function useLibrary() {
     reload();
     if ('BroadcastChannel' in window) {
       channelRef.current = new BroadcastChannel('shiyue-data');
-      channelRef.current.onmessage = event => event.data?.type === 'changed' && reload();
+      channelRef.current.onmessage = event => {
+        if (event.data?.type === 'restore-begin') writeSuspendedRef.current = true;
+        if (event.data?.type === 'restore-complete') { writeSuspendedRef.current = false; reload(); }
+        if (event.data?.type === 'changed' && !writeSuspendedRef.current) reload();
+      };
     }
     return () => channelRef.current?.close();
   }, [reload]);
 
   const notify = useCallback(() => channelRef.current?.postMessage({ type: 'changed', at: Date.now() }), []);
-  const mutate = useCallback(async action => { await action(); await reload(); notify(); }, [notify, reload]);
+  const assertWritable = useCallback(() => { if (writeSuspendedRef.current) throw new Error('另一标签页正在恢复备份，本标签页已暂停写入'); }, []);
+  const mutate = useCallback(async action => { assertWritable(); await action(); await reload(); notify(); }, [assertWritable, notify, reload]);
+  const runWithWriteBarrier = useCallback(async action => {
+    if (writeSuspendedRef.current) throw new Error('已有备份恢复正在进行');
+    writeSuspendedRef.current = true;
+    channelRef.current?.postMessage({ type: 'restore-begin', at: Date.now() });
+    await new Promise(resolve => setTimeout(resolve, 250));
+    try { return await action(); }
+    finally {
+      writeSuspendedRef.current = false;
+      await reload();
+      channelRef.current?.postMessage({ type: 'restore-complete', at: Date.now() });
+    }
+  }, [reload]);
 
-  const importPublication = useCallback(async (file, parsed, { keepDuplicate = false } = {}) => {
-    const estimate = await navigator.storage?.estimate?.();
-    if (estimate?.quota && estimate.usage + file.size * 1.5 > estimate.quota) throw new Error('预计剩余空间不足以安全保存原文件和解析结果');
-    const fingerprint = await checksumBlob(file);
-    const existing = data.books.find(book => !book.deletedAt && book.fingerprint === fingerprint);
-    if (existing && !keepDuplicate) return { duplicate: existing };
-    const now = nowIso();
-    const bookId = keepDuplicate ? createId('book') : parsed.id;
-    const fileId = createId('file');
-    const generationId = createId('import');
-    const book = normalizeBook({
-      ...parsed, id: bookId, fingerprint, status: 'WANT_TO_READ', capability: parsed.capability,
-      toc: parsed.toc || [], coverBlob: parsed.coverBlob, createdAt: now, updatedAt: now,
-    });
-    const fileRecord = { id: fileId, bookId, generationId, name: file.name, mimeType: file.type, size: file.size, checksum: fingerprint, blob: file, createdAt: now, parseStatus: 'READY' };
-    const sections = (parsed.sections || []).map((section, order) => ({ ...section, id: `section-${bookId}-${order}`, bookId, order }));
-    const job = { id: generationId, kind: 'IMPORT', state: 'STAGING', createdAt: now, expiresAt: new Date(Date.now() + 864e5).toISOString() };
-    await commitImport({ book: { ...book, activeFileId: fileId }, file: fileRecord, sections, job });
-    navigator.storage?.persist?.().catch(() => false);
-    await reload(); notify();
-    return { book };
-  }, [data.books, notify, reload]);
+  const importPublication = useCallback(async (file, parsed, options = {}) => {
+    assertWritable();
+    const result = await commitPublication({ file, parsed, books: data.books, ...options });
+    if (!result.duplicate) { await reload(); notify(); }
+    return result;
+  }, [assertWritable, data.books, notify, reload]);
 
   const updateBook = useCallback(async (bookId, patch) => {
     const current = data.books.find(book => book.id === bookId);
@@ -109,12 +107,18 @@ export function useLibrary() {
   }, [data, mutate]);
 
   const restoreBook = useCallback(async trashId => mutate(() => restoreTrashItem(trashId)), [mutate]);
+  const recoverDuplicateBook = useCallback(async book => {
+    const trashItem = data.trash.find(item => item.entityId === book.id && item.state === 'TRASHED');
+    if (!trashItem) throw new Error('未找到可恢复的回收站记录');
+    await mutate(() => restoreTrashItem(trashItem.id));
+    return { ...book, deletedAt: undefined };
+  }, [data.trash, mutate]);
 
   const saveNote = useCallback(async input => {
     const now = nowIso();
     const current = input.id ? data.notes.find(note => note.id === input.id) : null;
     const record = {
-      ...current, ...input, id: current?.id || createId('note'), content: String(input.content || '').trim(),
+      ...current, ...input, id: current?.id || createId('note'), content: String(input.content || ''),
       tagIds: input.tagIds || current?.tagIds || [], type: input.type || current?.type || '感悟',
       revision: (current?.revision || 0) + 1, createdAt: current?.createdAt || now, updatedAt: now, deletedAt: undefined,
     };
@@ -125,16 +129,31 @@ export function useLibrary() {
   const deleteAnnotation = useCallback(async (storeName, id) => {
     const current = data[storeName].find(item => item.id === id);
     if (!current) return;
-    const now = nowIso();
-    await mutate(() => putRecord(storeName, { ...current, deletedAt: now, revision: (current.revision || 0) + 1, updatedAt: now }));
+    await mutate(() => softDeleteEntity(storeName, current));
   }, [data, mutate]);
+
+  const restoreAnnotation = useCallback(async trashId => mutate(() => restoreTrashItem(trashId)), [mutate]);
+
+  const saveDraft = useCallback(async draft => {
+    assertWritable();
+    const record = { ...draft, id: draft.id, updatedAt: nowIso() };
+    await putRecord('drafts', record);
+    setData(value => ({ ...value, drafts: [...value.drafts.filter(item => item.id !== record.id), record] }));
+    return record;
+  }, [assertWritable]);
+  const discardDraft = useCallback(async id => {
+    assertWritable();
+    await deleteRecord('drafts', id);
+    setData(value => ({ ...value, drafts: value.drafts.filter(item => item.id !== id) }));
+  }, [assertWritable]);
 
   const saveHighlight = useCallback(async input => {
     const now = nowIso();
-    const record = { id: createId('highlight'), color: 'YELLOW', ...input, revision: 1, locatorStatus: 'RESOLVED', createdAt: now, updatedAt: now };
+    const current = input.id ? data.highlights.find(item => item.id === input.id) : null;
+    const record = { ...current, id: current?.id || createId('highlight'), color: 'YELLOW', ...input, revision: (current?.revision || 0) + 1, locatorStatus: 'RESOLVED', createdAt: current?.createdAt || now, updatedAt: now, deletedAt: undefined };
     await mutate(() => putRecord('highlights', record));
     return record;
-  }, [mutate]);
+  }, [data.highlights, mutate]);
 
   const saveBookmark = useCallback(async input => {
     const now = nowIso();
@@ -144,36 +163,56 @@ export function useLibrary() {
   }, [mutate]);
 
   const saveProgress = useCallback(async (bookId, locator, percentage) => {
-    const current = data.progress.find(item => item.bookId === bookId);
-    await putRecord('progress', { bookId, locator, percentage, revision: (current?.revision || 0) + 1, updatedAt: nowIso(), deviceId: 'local-web' });
-    setData(value => ({ ...value, progress: [...value.progress.filter(item => item.bookId !== bookId), { bookId, locator, percentage, revision: (current?.revision || 0) + 1, updatedAt: nowIso(), deviceId: 'local-web' }] }));
+    assertWritable();
+    const record = await putProgressMonotonic(bookId, { locator, percentage, updatedAt: nowIso(), deviceId: 'local-web' });
+    setData(value => ({ ...value, progress: [...value.progress.filter(item => item.bookId !== bookId), record] }));
     notify();
-  }, [data.progress, notify]);
+    return record;
+  }, [assertWritable, notify]);
 
   const addSession = useCallback(async (bookId, startedAt, activeSeconds) => {
-    if (activeSeconds < 1) return;
-    await putRecord('sessions', { id: createId('session'), bookId, startedAt, endedAt: nowIso(), activeSeconds });
+    assertWritable();
+    if (activeSeconds < 1) return null;
+    const record = {
+      id: createId('session'), bookId, startedAt,
+      endedAt: new Date(new Date(startedAt).getTime() + activeSeconds * 1000).toISOString(), activeSeconds,
+    };
+    await putRecord('sessions', record);
+    setData(value => ({ ...value, sessions: [...value.sessions, record] }));
     notify();
-  }, [notify]);
+    return record;
+  }, [assertWritable, notify]);
 
   const ensureTags = useCallback(async names => {
+    assertWritable();
     const cleaned = [...new Set(names.map(name => name.trim()).filter(Boolean))].slice(0, 8);
     const existingByName = new Map(activeRecords(data.tags).map(tag => [tag.name, tag]));
     const records = cleaned.map(name => existingByName.get(name) || ({ id: createId('tag'), name, revision: 1, createdAt: nowIso() }));
     await putMany('tags', records.filter(record => !existingByName.has(record.name)));
     await reload(); notify();
     return records.map(record => record.id);
-  }, [data.tags, notify, reload]);
+  }, [assertWritable, data.tags, notify, reload]);
 
   const saveSetting = useCallback(async (id, value) => mutate(() => putRecord('settings', { id, value, revision: (data.settings.find(item => item.id === id)?.revision || 0) + 1, updatedAt: nowIso() })), [data.settings, mutate]);
+  const saveCategory = useCallback(async name => {
+    const cleaned = String(name || '').trim().slice(0, 40); if (!cleaned) throw new Error('分类名不能为空');
+    if (data.categories.some(item => item.name === cleaned)) throw new Error('分类已存在');
+    await mutate(() => putRecord('categories', { id: createId('category'), name: cleaned, order: data.categories.length, createdAt: nowIso() }));
+  }, [data.categories, mutate]);
+  const deleteCategory = useCallback(async id => mutate(() => deleteCategoryAndUnassign(id, data.books)), [data.books, mutate]);
 
   const active = useMemo(() => ({
     books: activeRecords(data.books), notes: activeRecords(data.notes), highlights: activeRecords(data.highlights), bookmarks: activeRecords(data.bookmarks), tags: activeRecords(data.tags),
   }), [data]);
 
   return {
-    ...data, ...active, deletedBooks: data.books.filter(book => book.deletedAt), loading, error, storage,
-    reload, importPublication, updateBook, deleteBook, restoreBook, saveNote, deleteAnnotation,
-    saveHighlight, saveBookmark, saveProgress, addSession, ensureTags, saveSetting,
+    ...data, ...active,
+    deletedBooks: data.books.filter(book => book.deletedAt),
+    deletedNotes: data.notes.filter(item => item.deletedAt),
+    deletedHighlights: data.highlights.filter(item => item.deletedAt),
+    deletedBookmarks: data.bookmarks.filter(item => item.deletedAt),
+    loading, error, storage,
+    reload, runWithWriteBarrier, importPublication, updateBook, deleteBook, restoreBook, recoverDuplicateBook, saveNote, deleteAnnotation, restoreAnnotation,
+    saveHighlight, saveBookmark, saveProgress, addSession, ensureTags, saveSetting, saveDraft, discardDraft, saveCategory, deleteCategory,
   };
 }

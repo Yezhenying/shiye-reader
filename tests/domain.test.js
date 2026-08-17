@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {
-  activeRecords, buildLocator, calculateProgress, calculateStatistics, globalSearch,
-  headingsFromMarkdown, splitTextSections,
+  activeRecords, buildLegacyRescueRecords, buildLocator, calculateProgress, calculateStatistics,
+  creditedActivitySeconds, globalSearch, headingsFromMarkdown, normalizeBook, splitSessionByLocalDate,
+  splitTextSections,
 } from '../src/domain.js';
 
 assert.deepEqual(activeRecords([{ id: 1 }, { id: 2, deletedAt: 'x' }]).map(x => x.id), [1]);
@@ -17,4 +18,20 @@ assert.equal(search.tags.length, 1);
 const stats = calculateStatistics({ books: [{ id: 'b' }], notes: [{ id: 'n' }], highlights: [], sessions: [{ startedAt: new Date().toISOString(), activeSeconds: 125 }] });
 assert.equal(stats.todayMinutes, 2);
 assert.equal(stats.bookCount, 1);
-console.log('domain: 10 assertions passed');
+const preserved = normalizeBook({ id: 'b', title: '书', fingerprint: 'abc', activeFileId: 'f', toc: [{ label: '章' }], language: 'zh', parseWarnings: ['warning'] });
+assert.equal(preserved.fingerprint, 'abc');
+assert.equal(preserved.activeFileId, 'f');
+assert.equal(preserved.toc.length, 1);
+assert.equal(calculateProgress(sections, buildLocator({ id: 'pdf', format: 'PDF' }, sections[1], 0, { pageProgression: 0.5 })), 0.75);
+assert.equal(creditedActivitySeconds(0, 125000), 60);
+const midnight = new Date(); midnight.setHours(23, 59, 30, 0);
+const split = splitSessionByLocalDate({ startedAt: midnight.toISOString(), endedAt: new Date(midnight.getTime() + 60000).toISOString(), activeSeconds: 60 });
+assert.equal(split.length, 2);
+assert.equal(Math.round(split.reduce((sum, part) => sum + part.seconds, 0)), 60);
+const streakNow = new Date(); streakNow.setHours(12, 0, 0, 0);
+const streakSessions = Array.from({ length: 9 }, (_, offset) => { const date = new Date(streakNow); date.setDate(date.getDate() - offset); return { startedAt: date.toISOString(), endedAt: new Date(date.getTime() + 60000).toISOString(), activeSeconds: 60 }; });
+assert.equal(calculateStatistics({ books: [], notes: [], highlights: [], sessions: streakSessions, now: streakNow }).streak, 9);
+const legacy = buildLegacyRescueRecords([{ id: 'same', title: '旧书', contentPreview: '正文' }], [{ id: 'note', bookId: 'same', note: '想法' }], '2020-01-01T00:00:00.000Z');
+assert.equal(legacy.sections[0].id, 'section-same-0');
+assert.equal(buildLegacyRescueRecords([{ id: 'same', title: '旧书', contentPreview: '正文' }], [], '2020-01-01T00:00:00.000Z').sections[0].id, legacy.sections[0].id);
+console.log('domain: 21 assertions passed');

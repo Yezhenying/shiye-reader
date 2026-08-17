@@ -1,9 +1,11 @@
 node_modules/
 dist/
 .pi/
-.chrome-smoke*/
+.chrome-*/
 *.log
+*.err
 *.pid
+.tmp-*
 smoke-dom.html
 .DS_Store
 Thumbs.db

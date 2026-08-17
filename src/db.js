@@ -1,9 +1,9 @@
 const DB_NAME = 'shiyue-reader';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORE_NAMES = [
   'books', 'files', 'sections', 'progress', 'notes', 'highlights', 'bookmarks',
-  'tags', 'categories', 'sessions', 'settings', 'trash', 'jobs', 'meta',
+  'tags', 'categories', 'sessions', 'settings', 'trash', 'jobs', 'meta', 'drafts',
 ];
 
 const STORE_DEFINITIONS = {
@@ -21,6 +21,7 @@ const STORE_DEFINITIONS = {
   trash: { keyPath: 'id', indexes: [['deletedAt', 'deletedAt'], ['entityType', 'entityType']] },
   jobs: { keyPath: 'id', indexes: [['state', 'state']] },
   meta: { keyPath: 'key' },
+  drafts: { keyPath: 'id', indexes: [['updatedAt', 'updatedAt']] },
 };
 
 let databasePromise;
@@ -43,8 +44,9 @@ function transactionPromise(transaction) {
 export function openDatabase() {
   if (!('indexedDB' in globalThis)) return Promise.reject(new Error('当前浏览器不支持 IndexedDB'));
   if (!databasePromise) {
-    databasePromise = new Promise((resolve, reject) => {
+    const opening = new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
+      let settled = false;
       request.onupgradeneeded = () => {
         const database = request.result;
         for (const [name, definition] of Object.entries(STORE_DEFINITIONS)) {
@@ -58,12 +60,25 @@ export function openDatabase() {
       };
       request.onsuccess = () => {
         const database = request.result;
-        database.onversionchange = () => { database.close(); databasePromise = undefined; };
+        if (settled) { database.close(); return; }
+        settled = true;
+        database.onversionchange = () => { database.close(); if (databasePromise === opening) databasePromise = undefined; };
         resolve(database);
       };
-      request.onblocked = () => reject(new Error('数据库升级被其他标签页阻塞，请关闭其他拾页页面后重试'));
-      request.onerror = () => { databasePromise = undefined; reject(request.error || new Error('无法打开本地数据库')); };
+      request.onblocked = () => {
+        if (settled) return;
+        settled = true;
+        if (databasePromise === opening) databasePromise = undefined;
+        reject(new Error('数据库升级被其他标签页阻塞，请关闭其他拾页页面后重试'));
+      };
+      request.onerror = () => {
+        if (settled) return;
+        settled = true;
+        if (databasePromise === opening) databasePromise = undefined;
+        reject(request.error || new Error('无法打开本地数据库'));
+      };
     });
+    databasePromise = opening;
   }
   return databasePromise;
 }
@@ -110,6 +125,40 @@ export async function putMany(storeName, records) {
   await transactionPromise(transaction);
 }
 
+export async function commitLegacyRescue({ markerKey, books, sections, notes, completedAt }) {
+  const database = await openDatabase();
+  const transaction = database.transaction(['meta', 'books', 'sections', 'notes'], 'readwrite');
+  const meta = transaction.objectStore('meta');
+  const [marker, storedBooks, storedSections, storedNotes] = await Promise.all([
+    requestPromise(meta.get(markerKey)),
+    requestPromise(transaction.objectStore('books').getAllKeys()),
+    requestPromise(transaction.objectStore('sections').getAllKeys()),
+    requestPromise(transaction.objectStore('notes').getAllKeys()),
+  ]);
+  if (!marker) {
+    const bookIds = new Set(storedBooks); const sectionIds = new Set(storedSections); const noteIds = new Set(storedNotes);
+    const missingBooks = books.filter(record => !bookIds.has(record.id));
+    const missingSections = sections.filter(record => !sectionIds.has(record.id));
+    const missingNotes = notes.filter(record => !noteIds.has(record.id));
+    for (const record of missingBooks) transaction.objectStore('books').put(record);
+    for (const record of missingSections) transaction.objectStore('sections').put(record);
+    for (const record of missingNotes) transaction.objectStore('notes').put(record);
+    meta.put({ key: markerKey, completedAt, books: missingBooks.length, sections: missingSections.length, notes: missingNotes.length });
+  }
+  await transactionPromise(transaction);
+}
+
+export async function putProgressMonotonic(bookId, values) {
+  const database = await openDatabase();
+  const transaction = database.transaction('progress', 'readwrite');
+  const store = transaction.objectStore('progress');
+  const current = await requestPromise(store.get(bookId));
+  const record = { ...values, bookId, revision: Math.max(0, Number(current?.revision) || 0) + 1 };
+  store.put(record);
+  await transactionPromise(transaction);
+  return record;
+}
+
 export async function commitImport({ book, file, sections, job }) {
   const database = await openDatabase();
   const transaction = database.transaction(['books', 'files', 'sections', 'jobs'], 'readwrite');
@@ -118,6 +167,15 @@ export async function commitImport({ book, file, sections, job }) {
   transaction.objectStore('files').put(file);
   for (const section of sections) transaction.objectStore('sections').put(section);
   transaction.objectStore('jobs').put({ ...job, state: 'COMMITTED', completedAt: new Date().toISOString() });
+  await transactionPromise(transaction);
+}
+
+export async function deleteCategoryAndUnassign(categoryId, books) {
+  const database = await openDatabase();
+  const transaction = database.transaction(['categories', 'books'], 'readwrite');
+  transaction.objectStore('categories').delete(categoryId);
+  const now = new Date().toISOString();
+  for (const book of books.filter(item => item.categoryIds?.includes(categoryId))) transaction.objectStore('books').put({ ...book, categoryIds: book.categoryIds.filter(id => id !== categoryId), revision: (book.revision || 0) + 1, updatedAt: now });
   await transactionPromise(transaction);
 }
 
@@ -138,16 +196,28 @@ export async function softDeleteBook(book, related = {}) {
   return trashId;
 }
 
+export async function softDeleteEntity(storeName, record) {
+  if (!['notes', 'highlights', 'bookmarks'].includes(storeName)) throw new Error('不支持的回收站类型');
+  const now = new Date().toISOString();
+  const trashId = `trash-${record.id}-${Date.now()}`;
+  const database = await openDatabase();
+  const transaction = database.transaction([storeName, 'trash'], 'readwrite');
+  transaction.objectStore(storeName).put({ ...record, deletedAt: now, trashGenerationId: trashId, revision: (record.revision || 0) + 1, updatedAt: now });
+  transaction.objectStore('trash').put({ id: trashId, entityType: storeName.toUpperCase(), entityId: record.id, storeName, deletedAt: now, expiresAt: new Date(Date.now() + 30 * 864e5).toISOString(), state: 'TRASHED' });
+  await transactionPromise(transaction);
+  return trashId;
+}
+
 export async function restoreTrashItem(trashId) {
   const trash = await getRecord('trash', trashId);
-  if (!trash) throw new Error('回收站项目不存在');
-  const storeNames = ['books', 'notes', 'highlights', 'bookmarks'];
+  if (!trash || trash.state !== 'TRASHED') throw new Error('回收站项目不存在或已恢复');
+  const storeNames = trash.storeName ? [trash.storeName] : ['books', 'notes', 'highlights', 'bookmarks'];
   const snapshots = Object.fromEntries(await Promise.all(storeNames.map(async name => [name, await getAllRecords(name)])));
   const database = await openDatabase();
   const transaction = database.transaction([...storeNames, 'trash'], 'readwrite');
   for (const storeName of storeNames) {
     const store = transaction.objectStore(storeName);
-    for (const record of snapshots[storeName].filter(item => item.trashGenerationId === trashId)) {
+    for (const record of snapshots[storeName].filter(item => item.trashGenerationId === trashId || (trash.storeName === storeName && item.id === trash.entityId))) {
       store.put({ ...record, deletedAt: undefined, trashGenerationId: undefined, revision: (record.revision || 0) + 1, updatedAt: new Date().toISOString() });
     }
   }

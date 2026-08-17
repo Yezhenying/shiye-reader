@@ -1,0 +1,11 @@
+{
+  "layout": {
+    "innerWidth": 375,
+    "scrollWidth": 375,
+    "importLabel": "none",
+    "noteLabel": "none",
+    "toolbar": "grid"
+  },
+  "modalCount": 1,
+  "whitespaceRejected": true
+}

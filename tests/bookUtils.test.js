@@ -13,5 +13,6 @@ assert.equal(restored[0].progress, 100);
 assert.equal(restored[0].coverUrl, '');
 assert.match(buildMarkdown([{ title: '书', note: '内容', tags: ['思考'] }]), /## 书[\s\S]*#思考[\s\S]*内容/);
 assert.match(buildMarkdown(null), /^# 拾页/);
+assert.equal(normalizeImportedBooks(Array.from({ length: 101 }, (_, id) => ({ id: `book-${id}`, title: `书${id}` }))).length, 101);
 
-console.log('bookUtils: 10 assertions passed');
+console.log('bookUtils: 11 assertions passed');

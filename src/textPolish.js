@@ -57,7 +57,6 @@ export function normalizeStoredNotes(value) {
   if (!Array.isArray(value)) return [];
   return value
     .filter(note => note && typeof note.note === 'string' && note.note.trim())
-    .slice(0, 50)
     .map((note, index) => ({
       id: typeof note.id === 'string' ? note.id : `restored-${index}`,
       title: typeof note.title === 'string' && note.title.trim() ? note.title.trim() : '随手记',
@@ -65,8 +64,8 @@ export function normalizeStoredNotes(value) {
       cover: typeof note.cover === 'string' ? note.cover : 'note',
       coverUrl: typeof note.coverUrl === 'string' && /^https:\/\//.test(note.coverUrl) ? note.coverUrl : '',
       bookId: typeof note.bookId === 'string' ? note.bookId : '',
-      note: note.note.trim().slice(0, 1200),
-      tags: Array.isArray(note.tags) ? note.tags.filter(tag => typeof tag === 'string').slice(0, 5) : ['思考'],
+      note: note.note,
+      tags: Array.isArray(note.tags) ? note.tags.filter(tag => typeof tag === 'string') : ['思考'],
       type: ['感悟', '摘录', '问题', '行动'].includes(note.type) ? note.type : '感悟',
       category: typeof note.category === 'string' ? note.category : '随手记',
       date: typeof note.date === 'string' ? note.date : '最近',

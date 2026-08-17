@@ -1,6 +1,25 @@
 import assert from 'node:assert/strict';
 import { BACKUP_SCHEMA_VERSION, backupTestUtils } from '../src/backup.js';
+import { STORE_NAMES } from '../src/db.js';
 
-assert.equal(BACKUP_SCHEMA_VERSION, 1);
+assert.equal(BACKUP_SCHEMA_VERSION, 2);
 assert.equal(backupTestUtils.bytesToHex(new Uint8Array([0, 15, 255]).buffer), '000fff');
-console.log('backup: 2 assertions passed');
+const emptySnapshot = Object.fromEntries(STORE_NAMES.map(name => [name, []]));
+const emptyManifest = { stores: Object.fromEntries(STORE_NAMES.map(name => [name, 0])) };
+assert.equal(backupTestUtils.validateSnapshot(emptySnapshot, emptyManifest), true);
+assert.throws(() => backupTestUtils.validateSnapshot({ ...emptySnapshot, books: [{ id: 'b' }, { id: 'b' }] }, { ...emptyManifest, stores: { ...emptyManifest.stores, books: 2 } }), /重复主键/);
+assert.throws(() => backupTestUtils.validateSnapshot({ ...emptySnapshot, files: [{ id: 'f', bookId: 'missing', name: 'x.txt' }] }, { ...emptyManifest, stores: { ...emptyManifest.stores, files: 1 } }), /不存在的书籍/);
+const migratedV1 = backupTestUtils.normalizeBackupVersion(Object.fromEntries(STORE_NAMES.filter(name => name !== 'drafts').map(name => [name, []])), { schemaVersion: 1, stores: Object.fromEntries(STORE_NAMES.filter(name => name !== 'drafts').map(name => [name, 0])) });
+assert.deepEqual(migratedV1.snapshot.drafts, []);
+assert.equal(migratedV1.manifest.stores.drafts, 0);
+const timestamp = '2026-08-17T00:00:00.000Z';
+const validBook = { id: 'b', title: '测试书', author: '作者', format: 'TXT', capability: 'TEXT_VERIFIED', status: 'READING', revision: 1, createdAt: timestamp, updatedAt: timestamp, categoryIds: [], activeFileId: 'f' };
+const validLocator = { bookId: 'b', kind: 'TEXT', sectionOrder: 0, offset: 0 };
+const relationalSnapshot = { ...emptySnapshot, books: [validBook], files: [{ id: 'f', bookId: 'b', name: 'x.txt', size: 10, createdAt: timestamp, blobPath: 'files/f/original.bin' }], progress: [{ bookId: 'b', percentage: 0.5, locator: validLocator, revision: 1, updatedAt: timestamp }] };
+const relationalManifest = { schemaVersion: 2, stores: Object.fromEntries(STORE_NAMES.map(name => [name, relationalSnapshot[name].length])), entries: [{ path: 'data/snapshot.json' }, { path: 'files/f/original.bin', ownerStore: 'files', ownerId: 'f' }] };
+assert.equal(backupTestUtils.validateSnapshot(relationalSnapshot, relationalManifest), true);
+assert.equal(backupTestUtils.validateBinaryOwnership(relationalSnapshot, relationalManifest), undefined);
+assert.throws(() => backupTestUtils.validateBinaryOwnership(relationalSnapshot, { ...relationalManifest, entries: [relationalManifest.entries[0], { path: 'files/f/original.bin', ownerStore: 'books', ownerId: 'b' }] }), /所有权无效/);
+assert.throws(() => backupTestUtils.validateSnapshot({ ...relationalSnapshot, progress: [{ bookId: 'b', percentage: 2, locator: validLocator, revision: 1, updatedAt: timestamp }] }, relationalManifest), /百分比无效/);
+assert.throws(() => backupTestUtils.validateSnapshot({ ...relationalSnapshot, books: [{ ...validBook, title: { malicious: true } }] }, relationalManifest), /书名.*无效/);
+console.log('backup: 12 assertions passed');

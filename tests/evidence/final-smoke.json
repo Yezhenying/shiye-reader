@@ -1,0 +1,16 @@
+{
+  "before": {
+    "books": 1,
+    "highlights": 1,
+    "notes": 1,
+    "progress": 1,
+    "hash": "#/reader/file-1786955277123-chdgut"
+  },
+  "after": {
+    "title": "拾页 · 本地阅读与深度笔记",
+    "highlight": "本地优先",
+    "reader": true,
+    "hash": "#/reader/file-1786955277123-chdgut"
+  },
+  "selected": "本地优先"
+}

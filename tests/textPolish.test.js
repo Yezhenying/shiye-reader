@@ -9,8 +9,8 @@ assert.equal(polishText('第一点\n\n\n第二点'), '第一点。\n\n第二点�
 assert.deepEqual(normalizeStoredNotes(null), []);
 const restored = normalizeStoredNotes([{ note: '' }, { note: '  有效  ', tags: '错误类型' }, null]);
 assert.equal(restored.length, 1);
-assert.equal(restored[0].note, '有效');
+assert.equal(restored[0].note, '  有效  ');
 assert.deepEqual(restored[0].tags, ['思考']);
-assert.equal(normalizeStoredNotes(Array.from({ length: 80 }, (_, id) => ({ id, note: 'x' }))).length, 50);
+assert.equal(normalizeStoredNotes(Array.from({ length: 80 }, (_, id) => ({ id, note: 'x' }))).length, 80);
 
 console.log('textPolish: 10 assertions passed');

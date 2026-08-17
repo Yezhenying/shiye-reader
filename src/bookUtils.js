@@ -17,7 +17,6 @@ export function normalizeImportedBooks(value) {
   if (!Array.isArray(value)) return [];
   return value
     .filter(book => book && typeof book.title === 'string' && book.title.trim())
-    .slice(0, 100)
     .map((book, index) => ({
       id: typeof book.id === 'string' ? book.id : `restored-book-${index}`,
       title: book.title.trim().slice(0, 160),
