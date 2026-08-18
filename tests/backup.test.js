@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { BACKUP_SCHEMA_VERSION, backupTestUtils } from '../src/backup.js';
+import { BACKUP_SCHEMA_VERSION, RESTORE_STRATEGIES, backupTestUtils } from '../src/backup.js';
 import { STORE_NAMES } from '../src/db.js';
 
 assert.equal(BACKUP_SCHEMA_VERSION, 2);
+assert.deepEqual(RESTORE_STRATEGIES, ['REPLACE', 'SKIP', 'COPY', 'LATEST']);
 assert.equal(backupTestUtils.bytesToHex(new Uint8Array([0, 15, 255]).buffer), '000fff');
 const emptySnapshot = Object.fromEntries(STORE_NAMES.map(name => [name, []]));
 const emptyManifest = { stores: Object.fromEntries(STORE_NAMES.map(name => [name, 0])) };
@@ -28,4 +29,15 @@ assert.deepEqual(lightSnapshot.sections, []);
 assert.equal(lightSnapshot.books[0].activeFileId, '');
 assert.equal(lightSnapshot.books[0].sourceMissing, true);
 assert.equal(backupTestUtils.validateSnapshot(lightSnapshot, { stores: Object.fromEntries(STORE_NAMES.map(name => [name, lightSnapshot[name].length])) }), true);
-console.log('backup: 17 assertions passed');
+const currentSnapshot = { ...emptySnapshot, books: [{ ...validBook, title: '当前书', updatedAt: '2026-08-18T00:00:00.000Z' }], files: [{ id: 'f', bookId: 'b', name: 'current.txt', size: 1, createdAt: timestamp }] };
+const incomingSnapshot = { ...emptySnapshot, books: [{ ...validBook, title: '备份书', updatedAt: '2026-08-17T00:00:00.000Z' }], files: [{ id: 'f', bookId: 'b', name: 'backup.txt', size: 1, createdAt: timestamp }] };
+const skipped = backupTestUtils.combineSnapshots(currentSnapshot, incomingSnapshot, 'SKIP');
+assert.equal(skipped.books.length, 1);
+assert.equal(skipped.books[0].title, '当前书');
+const copied = backupTestUtils.combineSnapshots(currentSnapshot, incomingSnapshot, 'COPY');
+assert.equal(copied.books.length, 2);
+assert.ok(copied.books.some(book => book.id.startsWith('restored-books-b')));
+assert.ok(copied.files.some(file => file.bookId.startsWith('restored-books-b')));
+const latest = backupTestUtils.combineSnapshots(currentSnapshot, incomingSnapshot, 'LATEST');
+assert.equal(latest.books[0].title, '当前书');
+console.log('backup: 24 assertions passed');

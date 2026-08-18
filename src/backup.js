@@ -290,8 +290,9 @@ export async function inspectBackup(file) {
   return { zip, manifest, snapshot };
 }
 
-export async function restoreFullBackup(file) {
-  const { zip, manifest, snapshot } = await inspectBackup(file);
+export const RESTORE_STRATEGIES = ['REPLACE', 'SKIP', 'COPY', 'LATEST'];
+
+async function materializeBackup({ zip, manifest, snapshot }) {
   const books = [];
   for (const record of snapshot.books) {
     if (!record.coverBlobPath) { books.push(record); continue; }
@@ -308,8 +309,89 @@ export async function restoreFullBackup(file) {
     const { blobPath, ...metadata } = record;
     files.push({ ...metadata, blob: new Blob([blob], { type: expected.mimeType || record.mimeType || '' }) });
   }
-  await replaceDatabaseSnapshot({ ...snapshot, books, files });
-  return manifest;
+  return { ...snapshot, books, files };
 }
 
-export const backupTestUtils = { bytesToHex, validateSnapshot, validateBinaryOwnership, normalizeBackupVersion, createLightSnapshot };
+function recordTimestamp(record) {
+  const time = Date.parse(record?.updatedAt || record?.createdAt || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function mergeByKey(store, current, incoming, strategy) {
+  const existing = new Map(current.map(record => [storeKey(store, record), record]));
+  for (const record of incoming) {
+    const key = storeKey(store, record);
+    if (!existing.has(key) || (strategy === 'LATEST' && recordTimestamp(record) > recordTimestamp(existing.get(key)))) existing.set(key, record);
+  }
+  return [...existing.values()];
+}
+
+function storeKey(store, record) { return keyFor(store, record); }
+
+function skipConflicts(current, incoming) {
+  const currentKeys = Object.fromEntries(STORE_NAMES.map(store => [store, new Set(current[store].map(record => storeKey(store, record)))]));
+  const retainedBooks = new Set(incoming.books.filter(book => !currentKeys.books.has(book.id)).map(book => book.id));
+  const hasBook = record => !record.bookId || retainedBooks.has(record.bookId) || currentKeys.books.has(record.bookId);
+  const output = {};
+  for (const store of STORE_NAMES) {
+    output[store] = incoming[store].filter(record => !currentKeys[store].has(storeKey(store, record)) && hasBook(record));
+  }
+  return Object.fromEntries(STORE_NAMES.map(store => [store, [...current[store], ...output[store]]]));
+}
+
+function remapLocator(locator, bookIds) {
+  return locator?.bookId ? { ...locator, bookId: bookIds.get(locator.bookId) || locator.bookId } : locator;
+}
+
+function copyConflicts(current, incoming) {
+  const maps = Object.fromEntries(STORE_NAMES.filter(store => !['progress', 'meta', 'settings'].includes(store)).map(store => [store, new Map()]));
+  const occupied = Object.fromEntries(STORE_NAMES.map(store => [store, new Set(current[store].map(record => storeKey(store, record)))]));
+  for (const store of Object.keys(maps)) {
+    for (const record of incoming[store]) {
+      const key = storeKey(store, record);
+      if (!occupied[store].has(key)) continue;
+      let copy = `restored-${store}-${key}`; let sequence = 2;
+      while (occupied[store].has(copy)) copy = `restored-${store}-${key}-${sequence++}`;
+      maps[store].set(key, copy); occupied[store].add(copy);
+    }
+  }
+  const mapped = (store, id) => maps[store]?.get(id) || id;
+  const remapRecord = (store, record) => {
+    const id = store === 'progress' ? mapped('books', record.bookId) : mapped(store, record.id);
+    const bookId = record.bookId ? mapped('books', record.bookId) : record.bookId;
+    const common = { ...record, ...(store === 'progress' ? { bookId: id } : { id }), ...(record.bookId ? { bookId } : {}), locator: remapLocator(record.locator, maps.books) };
+    if (store === 'books') return { ...common, activeFileId: mapped('files', record.activeFileId), categoryIds: (record.categoryIds || []).map(value => mapped('categories', value)) };
+    if (store === 'notes') return { ...common, tagIds: (record.tagIds || []).map(value => mapped('tags', value)), highlightId: mapped('highlights', record.highlightId) };
+    if (store === 'trash') { const entityStore = { BOOK: 'books', NOTES: 'notes', HIGHLIGHTS: 'highlights', BOOKMARKS: 'bookmarks' }[record.entityType]; return { ...common, entityId: mapped(entityStore, record.entityId) }; }
+    return common;
+  };
+  const output = {};
+  for (const store of STORE_NAMES) {
+    const records = incoming[store].map(record => remapRecord(store, record));
+    output[store] = ['settings', 'meta'].includes(store) ? records.filter(record => !occupied[store].has(storeKey(store, record))) : records;
+  }
+  return Object.fromEntries(STORE_NAMES.map(store => [store, [...current[store], ...output[store]]]));
+}
+
+function combineSnapshots(current, incoming, strategy) {
+  if (strategy === 'REPLACE') return incoming;
+  if (strategy === 'SKIP') return skipConflicts(current, incoming);
+  if (strategy === 'COPY') return copyConflicts(current, incoming);
+  if (strategy === 'LATEST') return Object.fromEntries(STORE_NAMES.map(store => [store, mergeByKey(store, current[store], incoming[store], 'LATEST')]));
+  throw new Error('未知的恢复冲突策略');
+}
+
+export async function restoreBackup(file, { strategy = 'REPLACE' } = {}) {
+  if (!RESTORE_STRATEGIES.includes(strategy)) throw new Error('未知的恢复冲突策略');
+  const inspected = await inspectBackup(file);
+  const incoming = await materializeBackup(inspected);
+  const snapshot = strategy === 'REPLACE' ? incoming : combineSnapshots(await exportDatabaseSnapshot(), incoming, strategy);
+  const stores = Object.fromEntries(STORE_NAMES.map(name => [name, snapshot[name]?.length || 0]));
+  validateSnapshot(snapshot, { stores }, { allowBinaryBlobs: true });
+  await replaceDatabaseSnapshot(snapshot);
+  return { manifest: inspected.manifest, strategy };
+}
+
+export async function restoreFullBackup(file) { return restoreBackup(file); }
+
+export const backupTestUtils = { bytesToHex, validateSnapshot, validateBinaryOwnership, normalizeBackupVersion, createLightSnapshot, combineSnapshots };

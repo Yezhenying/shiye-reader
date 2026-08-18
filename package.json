@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "test": "node tests/textPolish.test.js && node tests/bookUtils.test.js && node tests/domain.test.js && node tests/db.test.js && node tests/backup.test.js && node tests/ebookParser.test.js && node tests/library-category.integration.test.js && node tests/import.integration.test.js",
     "test:pages": "node tests/pages-build.test.mjs",
-    "test:e2e": "node tests/import.e2e.test.js && node tests/import-formats.e2e.test.js && node tests/migration.e2e.test.js && node tests/category-polish.e2e.test.js && node tests/shelf-performance.e2e.test.js",
+    "test:e2e": "node tests/import.e2e.test.js && node tests/import-formats.e2e.test.js && node tests/migration.e2e.test.js && node tests/category-polish.e2e.test.js && node tests/shelf-performance.e2e.test.js && node tests/accessibility.e2e.test.js",
     "generate:fixtures": "node tests/generate-fixtures.mjs",
     "check": "npm run test && npm run test:pages && npm run build"
   },
@@ -23,6 +23,7 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "fake-indexeddb": "^6.2.5",
     "playwright-core": "^1.62.1"
   }
