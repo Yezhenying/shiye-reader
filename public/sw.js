@@ -31,6 +31,7 @@ self.addEventListener('install', event => {
     const cache = await caches.open(activeCache);
     await cache.put(appUrl('sw-assets.json'), response);
     await cache.addAll(manifest.assets);
+    await self.skipWaiting();
   })());
 });
 
@@ -64,6 +65,12 @@ self.addEventListener('message', event => {
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || new URL(event.request.url).origin !== location.origin) return;
   event.respondWith((async () => {
+    // A navigation must prefer the network when available so a deployed HTML file
+    // can point at its newly hashed assets instead of being pinned by an old shell.
+    if (event.request.mode === 'navigate') {
+      try { return await fetch(event.request); }
+      catch { return caches.match(appUrl('index.html')); }
+    }
     const cached = await caches.match(event.request);
     if (cached) return cached;
     try {
@@ -74,7 +81,6 @@ self.addEventListener('fetch', event => {
       }
       return response;
     } catch (error) {
-      if (event.request.mode === 'navigate') return caches.match(appUrl('index.html'));
       throw error;
     }
   })());

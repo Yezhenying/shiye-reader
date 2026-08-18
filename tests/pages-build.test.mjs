@@ -22,6 +22,8 @@ assert.equal(assets.base, '/shiye-reader/');
 assert.ok(assets.assets.every(asset => asset.startsWith('/shiye-reader/')));
 assert.ok(existsSync(resolve(root, 'dist/sw.js')));
 assert.match(worker, /self\.registration\.scope/);
+assert.match(worker, /self\.skipWaiting\(\)/);
+assert.match(worker, /event\.request\.mode === 'navigate'/);
 assert.equal(manifest.start_url, './#/');
 assert.equal(manifest.scope, './');
 
