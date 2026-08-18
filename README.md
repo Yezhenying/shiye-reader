@@ -15,6 +15,18 @@ npm run dev
 npm run check
 ```
 
+GitHub Pages 项目页路径检查：
+
+```bash
+npm run test:pages
+```
+
+## 公网发布（GitHub Pages）
+
+项目可作为公开静态站点发布；每位访问者的数据只保存在自己浏览器的 IndexedDB 中，不会上传到 GitHub，也不提供账号或跨设备同步。
+
+无需命令行 Git 的发布步骤见 [`docs/DEPLOY_GITHUB_PAGES.md`](./docs/DEPLOY_GITHUB_PAGES.md)。
+
 ## 产品与工程基线
 
 请按以下顺序阅读：

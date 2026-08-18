@@ -12,6 +12,7 @@ import {
   calculateStatistics, creditedActivitySeconds, globalSearch,
 } from './domain.js';
 import { useLibrary } from './useLibrary.js';
+import { describePolishChanges, polishText } from './textPolish.js';
 
 const NAV = [
   ['今日阅读', House, '#/'], ['我的书架', Library, '#/library'], ['全部笔记', NotebookPen, '#/notes'],
@@ -106,39 +107,99 @@ function ImportDialog({ library, close, openBook, toast }) {
 function NoteDialog({ library, close, bookId = '', highlight = null, editing = null, toast }) {
   const draftId = `note-${editing?.id || highlight?.id || bookId || 'global'}`;
   const recovered = library.drafts.find(item => item.id === draftId);
-  const [type, setType] = useState(recovered?.type || editing?.type || (highlight ? '摘录' : '感悟'));
-  const [content, setContent] = useState(recovered?.content ?? editing?.content ?? highlight?.quote ?? '');
-  const [tags, setTags] = useState(recovered?.tags ?? (editing?.tagIds || []).map(id => library.tags.find(tag => tag.id === id)?.name).filter(Boolean).join('，'));
-  const [draftStatus, setDraftStatus] = useState(recovered ? '已恢复草稿' : '');
   const initialType = editing?.type || (highlight ? '摘录' : '感悟');
   const initialContent = editing?.content ?? highlight?.quote ?? '';
   const initialTags = (editing?.tagIds || []).map(id => library.tags.find(tag => tag.id === id)?.name).filter(Boolean).join('，');
-  const dirty = Boolean(recovered) || type !== initialType || content !== initialContent || tags !== initialTags;
-  const draft = { id: draftId, bookId: bookId || editing?.bookId || '', editingId: editing?.id || '', highlightId: highlight?.id || '', type, content, tags };
+  const initialSourceContent = editing?.originalContent || '';
+  const [type, setType] = useState(recovered?.type || initialType);
+  const [content, setContent] = useState(recovered?.content ?? initialContent);
+  const [tags, setTags] = useState(recovered?.tags ?? initialTags);
+  const [sourceContent, setSourceContent] = useState(recovered?.sourceContent ?? initialSourceContent);
+  const [polishPreview, setPolishPreview] = useState(null);
+  const [draftStatus, setDraftStatus] = useState(recovered ? '已恢复草稿' : '');
+  const dirty = Boolean(recovered) || type !== initialType || content !== initialContent || tags !== initialTags || sourceContent !== initialSourceContent;
+  const draft = { id: draftId, bookId: bookId || editing?.bookId || '', editingId: editing?.id || '', highlightId: highlight?.id || '', type, content, tags, sourceContent };
   useEffect(() => {
     if (!dirty) return;
     setDraftStatus('正在保存草稿…');
     const timer = setTimeout(() => library.saveDraft(draft).then(() => setDraftStatus('草稿已保存')).catch(() => setDraftStatus('草稿保存失败')), 500);
     return () => clearTimeout(timer);
-  }, [draftId, type, content, tags, dirty]);
+  }, [draftId, type, content, tags, sourceContent, dirty]);
   const guardedClose = async () => { if (dirty) { try { await library.saveDraft(draft); } catch { if (!confirm('草稿未能保存，关闭会丢失本次修改。仍要关闭吗？')) return; } } close(); };
+  const generatePolish = () => {
+    if (type === '摘录' || !content.trim()) return;
+    const suggestion = polishText(content);
+    if (suggestion === content) { toast('未发现适合的本地优化项'); return; }
+    setPolishPreview({ original: content, suggestion, changes: describePolishChanges(content, suggestion) });
+  };
+  const applyPolish = () => {
+    if (!polishPreview) return;
+    setContent(polishPreview.suggestion);
+    setSourceContent(polishPreview.original);
+    setPolishPreview(null);
+    setDraftStatus('已采用本地优化建议');
+  };
+  const restoreOriginal = () => {
+    if (!sourceContent) return;
+    setContent(sourceContent);
+    setSourceContent('');
+    setPolishPreview(null);
+    setDraftStatus('已恢复原文');
+  };
+  const updateType = nextType => { setType(nextType); if (nextType === '摘录') setPolishPreview(null); };
   const save = async () => {
     if (!content.trim()) return;
     try {
       const tagIds = await library.ensureTags(tags.split(/[,，#\s]+/));
-      await library.saveNote({ ...editing, bookId: bookId || editing?.bookId || '', highlightId: highlight?.id || editing?.highlightId, locator: highlight?.locator || editing?.locator, type, content, tagIds });
+      const originalContent = type === '摘录' || sourceContent === content ? undefined : sourceContent || undefined;
+      await library.saveNote({ ...editing, bookId: bookId || editing?.bookId || '', highlightId: highlight?.id || editing?.highlightId, locator: highlight?.locator || editing?.locator, type, content, originalContent, tagIds });
       await library.discardDraft(draftId);
-      toast('笔记已原样保存'); close();
+      toast(originalContent ? '笔记已保存，可随时恢复原文' : '笔记已保存'); close();
     } catch (error) { toast(`保存失败：${error.message}`); }
   };
-  return <Modal close={guardedClose} className="note-modal" label={editing ? '编辑笔记' : '新建笔记'}><div className="modal-head"><div><p>内容按输入原样保存 · 草稿 500ms 自动保存</p><h2>{editing ? '编辑笔记' : '记录此刻的想法'}</h2></div><button onClick={guardedClose} aria-label="关闭笔记"><X/></button></div><div className="note-types">{['感悟','摘录','问题','行动'].map(item => <button key={item} className={type === item ? 'active' : ''} onClick={() => setType(item)}>{item}</button>)}</div><label className="field-label">标签<input value={tags} onChange={e => setTags(e.target.value)} placeholder="思考，历史"/></label><textarea autoFocus value={content} onChange={e => setContent(e.target.value)} maxLength={12000}/><div className="modal-actions"><span>{content.length}/12000 · {draftStatus}</span><button disabled={!content.trim()} onClick={save}><Check size={15}/>保存</button></div></Modal>;
+  return <Modal close={guardedClose} className="note-modal" label={editing ? '编辑笔记' : '新建笔记'}><div className="modal-head"><div><p>草稿 500ms 自动保存 · 本地处理，不会联网</p><h2>{editing ? '编辑笔记' : '记录此刻的想法'}</h2></div><button onClick={guardedClose} aria-label="关闭笔记"><X/></button></div><div className="note-types">{['感悟','摘录','问题','行动'].map(item => <button key={item} className={type === item ? 'active' : ''} onClick={() => updateType(item)}>{item}</button>)}</div><label className="field-label">标签<input value={tags} onChange={e => setTags(e.target.value)} placeholder="思考，历史"/></label><textarea autoFocus aria-label="笔记内容" value={content} onChange={event => { setContent(event.target.value); setPolishPreview(null); }} maxLength={12000}/>{type !== '摘录' ? <div className="polish-tools"><button type="button" className="polish-trigger" disabled={!content.trim()} onClick={generatePolish}>轻度表达优化</button>{sourceContent && <button type="button" className="restore-original" onClick={restoreOriginal}>恢复原文</button>}<span>只调整口语措辞、段落和标点；不扩写观点。</span></div> : <p className="quote-protection">摘录必须保持原文准确性，已关闭表达优化。</p>}{polishPreview && <section className="polish-compare" aria-label="本地表达优化建议"><div className="polish-compare-head"><div><strong>本地表达优化建议</strong><span>{polishPreview.changes.join('、')}</span></div><button type="button" onClick={() => setPolishPreview(null)} aria-label="关闭优化建议"><X size={15}/></button></div><div className="polish-columns"><div><span>原文</span><p>{polishPreview.original}</p></div><div><span>建议</span><p>{polishPreview.suggestion}</p></div></div><div className="polish-actions"><button type="button" onClick={() => setPolishPreview(null)}>保留原文</button><button type="button" className="accept-polish" onClick={applyPolish}>采用建议</button></div></section>}<div className="modal-actions"><span>{content.length}/12000 · {draftStatus}</span><button disabled={!content.trim()} onClick={save}><Check size={15}/>保存</button></div></Modal>;
 }
 
 function BookEditDialog({ book, library, close, toast }) {
-  const [form, setForm] = useState({ title: book.title, author: book.author, status: book.status || 'WANT_TO_READ', categoryIds: book.categoryIds || [] });
-  const save = async () => { await library.updateBook(book.id, form); toast('书籍信息已更新'); close(); };
-  return <Modal close={close}><div className="modal-head"><div><p>书籍信息</p><h2>编辑《{book.title}》</h2></div><button onClick={close} aria-label="关闭书籍编辑"><X/></button></div><div className="form-stack"><label>书名<input value={form.title} onChange={e => setForm({...form,title:e.target.value})}/></label><label>作者<input value={form.author} onChange={e => setForm({...form,author:e.target.value})}/></label><label>阅读状态<select value={form.status} onChange={e => setForm({...form,status:e.target.value})}>{BOOK_STATUSES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>分类<select value={form.categoryIds[0]||''} onChange={e=>setForm({...form,categoryIds:e.target.value?[e.target.value]:[]})}><option value="">未分类</option>{library.categories.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label></div><div className="modal-actions"><span/><button onClick={save}>保存修改</button></div></Modal>;
+  const [form, setForm] = useState({ title: book.title, author: book.author, status: book.status || 'WANT_TO_READ', categoryIds: (book.categoryIds || []).slice(0, 1) });
+  const save = async () => {
+    try { await library.updateBook(book.id, form); toast('书籍信息已更新'); close(); }
+    catch (error) { toast(`保存失败：${error.message}`); }
+  };
+  return <Modal close={close} label="编辑书籍"><div className="modal-head"><div><p>书籍信息</p><h2>编辑《{book.title}》</h2></div><button onClick={close} aria-label="关闭书籍编辑"><X/></button></div><div className="form-stack"><label>书名<input value={form.title} onChange={e => setForm({...form,title:e.target.value})}/></label><label>作者<input value={form.author} onChange={e => setForm({...form,author:e.target.value})}/></label><label>阅读状态<select value={form.status} onChange={e => setForm({...form,status:e.target.value})}>{BOOK_STATUSES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><div className="field-label"><span>主分类</span><div className="category-choice" role="group" aria-label="主分类"><button type="button" aria-pressed={!form.categoryIds[0]} className={!form.categoryIds[0] ? 'active' : ''} onClick={() => setForm({...form,categoryIds:[]})}>未分类</button>{library.categories.map(item => <button type="button" aria-pressed={form.categoryIds[0]===item.id} className={form.categoryIds[0]===item.id ? 'active' : ''} key={item.id} onClick={() => setForm({...form,categoryIds:[item.id]})}>{item.name}</button>)}</div></div></div><div className="modal-actions"><span>每本书只能设置一个主分类</span><button onClick={save}>保存修改</button></div></Modal>;
 }
+
+function CategoryManagerDialog({ library, close, toast }) {
+  const [newName, setNewName] = useState('');
+  const [editingId, setEditingId] = useState('');
+  const [editingName, setEditingName] = useState('');
+  const [deletingId, setDeletingId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const categories = useMemo(() => [...library.categories].sort((a, b) => (a.order || 0) - (b.order || 0) || a.name.localeCompare(b.name, 'zh-CN')), [library.categories]);
+  const countFor = id => library.books.filter(book => book.categoryIds?.[0] === id).length;
+  const create = async event => {
+    event.preventDefault();
+    try { setBusy(true); const category = await library.saveCategory(newName); setNewName(''); toast(`已创建“${category.name}”`); }
+    catch (error) { toast(error.message); }
+    finally { setBusy(false); }
+  };
+  const rename = async id => {
+    try { setBusy(true); const category = await library.renameCategory(id, editingName); setEditingId(''); setEditingName(''); toast(`已重命名为“${category.name}”`); }
+    catch (error) { toast(error.message); }
+    finally { setBusy(false); }
+  };
+  const remove = async id => {
+    const category = categories.find(item => item.id === id);
+    try { setBusy(true); const count = await library.deleteCategory(id); setDeletingId(''); toast(`已删除“${category?.name || '分类'}”，${count} 本书变为未分类`); }
+    catch (error) { toast(`删除失败：${error.message}`); }
+    finally { setBusy(false); }
+  };
+  return <Modal close={close} className="category-manager" label="管理书架分类"><div className="modal-head"><div><p>书架整理</p><h2>管理分类</h2></div><button onClick={close} aria-label="关闭分类管理"><X/></button></div><form className="category-create" onSubmit={create}><label>新分类<input value={newName} maxLength={40} onChange={event => setNewName(event.target.value)} placeholder="例如：待读书单"/></label><button disabled={busy || !newName.trim()}><Plus size={15}/>新建</button></form><p className="category-helper">每本书只保留一个主分类。删除分类不会删除书籍，只会将相关书籍设为未分类。</p><div className="category-manager-list">{categories.length ? categories.map(category => { const count = countFor(category.id); const editing = editingId === category.id; const deleting = deletingId === category.id; return <div className="category-manager-row" key={category.id}><div className="category-row-title">{editing ? <input aria-label={`重命名 ${category.name}`} value={editingName} maxLength={40} onChange={event => setEditingName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') rename(category.id); if (event.key === 'Escape') setEditingId(''); }}/> : <><strong>{category.name}</strong><span>{count} 本书</span></>}</div>{editing ? <div className="category-row-actions"><button disabled={busy || !editingName.trim()} onClick={() => rename(category.id)}>保存</button><button disabled={busy} onClick={() => setEditingId('')}>取消</button></div> : <div className="category-row-actions"><button disabled={busy} onClick={() => { setEditingId(category.id); setEditingName(category.name); setDeletingId(''); }}>重命名</button><button disabled={busy} onClick={() => { setDeletingId(category.id); setEditingId(''); }}>删除</button></div>}{deleting && <div className="category-delete-confirm" role="alert"><span>确认删除“{category.name}”？{count ? `${count} 本书将变为未分类。` : '该分类目前没有书籍。'}</span><button disabled={busy} onClick={() => remove(category.id)}>确认删除</button><button disabled={busy} onClick={() => setDeletingId('')}>取消</button></div>}</div>; }) : <div className="empty compact"><strong>还没有分类</strong><span>新建分类后，可在书架中批量归类。</span></div>}</div></Modal>;
+}
+
+const LibraryBookCard = React.memo(function LibraryBookCard({ book, progress, categoryName, selectionMode, selected, onToggle, onEdit, onRemove }) {
+  return <article className={`library-card card ${selected ? 'selected' : ''}`}><div className="library-card-cover">{selectionMode && <button type="button" className="book-selector" role="checkbox" aria-checked={selected} aria-label={`${selected ? '取消选择' : '选择'}《${book.title}》`} onClick={() => onToggle(book.id)}><Check size={15}/></button>}<a href={`#/reader/${encodeURIComponent(book.id)}`} tabIndex={selectionMode ? -1 : undefined}><Cover book={book}/></a></div><div><div className="library-card-meta"><span>{bookStatusLabel(book.status)}</span>{categoryName && <small>{categoryName}</small>}</div><h3>{book.title}</h3><p>{book.author}</p><div className="library-progress"><i style={{width:`${progress * 100}%`}}/></div><em>{Math.round(progress * 100)}% · {book.format}</em>{!selectionMode && <div className="card-actions"><a href={`#/reader/${encodeURIComponent(book.id)}`}>阅读</a><button onClick={() => onEdit(book)}>编辑</button><button aria-label={`删除《${book.title}》`} onClick={() => onRemove(book)}><Trash2 size={12}/></button></div>}</div></article>;
+});
 
 function Sidebar({ route, count, menu, close }) {
   const active = route.page === 'reader' ? '' : route.page;
@@ -148,14 +209,53 @@ function Sidebar({ route, count, menu, close }) {
 function Dashboard({ library, stats, openImport }) {
   const recent = [...library.books].sort((a,b) => String(b.lastOpenedAt).localeCompare(String(a.lastOpenedAt)))[0];
   const progress = recent ? library.progress.find(item => item.bookId === recent.id) : null;
-  return <><section className="welcome"><div><span className="eyebrow">{new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</span><h1>今天，读点什么？</h1><p>所有阅读、划线与笔记都保存在当前设备。</p></div><div className="streak"><span>连续阅读</span><strong>{stats.streak}<small> 天</small></strong></div></section>{recent ? <section className="current-real card"><Cover book={recent}/><div><span className="eyebrow">最近阅读</span><h2>{recent.title}</h2><p>{recent.author}</p><div className="progress"><i style={{width:`${Math.round((progress?.percentage || 0)*100)}%`}}/></div><span>{Math.round((progress?.percentage || 0)*100)}% · 今日 {stats.todayMinutes} 分钟</span><a className="primary-action" href={`#/reader/${encodeURIComponent(recent.id)}`}>继续阅读 <ChevronRight size={15}/></a></div></section> : <section className="empty-dashboard card"><BookPlus/><h2>书架还是空的</h2><p>导入你合法持有的电子书，开始本地阅读。</p><button className="primary-action" onClick={openImport}>导入第一本书</button></section>}<section className="quick-stats"><div className="card"><strong>{stats.bookCount}</strong><span>书架藏书</span></div><div className="card"><strong>{stats.noteCount}</strong><span>笔记</span></div><div className="card"><strong>{stats.highlightCount}</strong><span>划线</span></div><div className="card"><strong>{stats.todayMinutes}</strong><span>今日分钟</span></div></section></>;
+  return <><section className="local-space-notice" aria-label="本地数据说明"><div><strong>本地阅读空间</strong><span>书籍、笔记与进度仅保存在当前浏览器；换设备前请先导出完整备份。</span></div><a href="#/settings">前往备份</a></section><section className="welcome"><div><span className="eyebrow">{new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</span><h1>今天，读点什么？</h1><p>所有阅读、划线与笔记都保存在当前设备。</p></div><div className="streak"><span>连续阅读</span><strong>{stats.streak}<small> 天</small></strong></div></section>{recent ? <section className="current-real card"><Cover book={recent}/><div><span className="eyebrow">最近阅读</span><h2>{recent.title}</h2><p>{recent.author}</p><div className="progress"><i style={{width:`${Math.round((progress?.percentage || 0)*100)}%`}}/></div><span>{Math.round((progress?.percentage || 0)*100)}% · 今日 {stats.todayMinutes} 分钟</span><a className="primary-action" href={`#/reader/${encodeURIComponent(recent.id)}`}>继续阅读 <ChevronRight size={15}/></a></div></section> : <section className="empty-dashboard card"><BookPlus/><h2>书架还是空的</h2><p>导入你合法持有的电子书，开始本地阅读。</p><button className="primary-action" onClick={openImport}>导入第一本书</button></section>}<section className="quick-stats"><div className="card"><strong>{stats.bookCount}</strong><span>书架藏书</span></div><div className="card"><strong>{stats.noteCount}</strong><span>笔记</span></div><div className="card"><strong>{stats.highlightCount}</strong><span>划线</span></div><div className="card"><strong>{stats.todayMinutes}</strong><span>今日分钟</span></div></section></>;
 }
 
 function LibraryPage({ library, openImport, toast }) {
-  const [filter, setFilter] = useState('ALL'); const [categoryFilter,setCategoryFilter]=useState('ALL'); const [sort, setSort] = useState('recent'); const [edit, setEdit] = useState(null);
-  const books = useMemo(() => library.books.filter(book => (filter === 'ALL' || book.status === filter) && (categoryFilter==='ALL'||(book.categoryIds||[]).includes(categoryFilter))).sort((a,b) => sort === 'title' ? a.title.localeCompare(b.title,'zh-CN') : String(b.updatedAt).localeCompare(String(a.updatedAt))), [library.books,filter,categoryFilter,sort]);
-  const remove = async book => { if (!confirm(`将《${book.title}》移入回收站？默认保留笔记与划线。`)) return; await library.deleteBook(book.id,true); toast('已移入回收站'); };
-  return <section className="module-page"><div className="module-heading module-heading-row"><div><span className="eyebrow">真实本地数据</span><h1>我的书架</h1><p>管理状态、排序、删除和恢复。</p></div><button className="primary-action" onClick={openImport}><BookPlus size={16}/>导入电子书</button></div><div className="library-toolbar"><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="ALL">全部状态</option>{BOOK_STATUSES.map(item=><option key={item.value} value={item.value}>{item.label}</option>)}</select><select value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)}><option value="ALL">全部分类</option>{library.categories.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select><select value={sort} onChange={e=>setSort(e.target.value)}><option value="recent">最近更新</option><option value="title">按书名</option></select><button onClick={async()=>{const name=prompt('新分类名称');if(!name)return;try{await library.saveCategory(name);toast('分类已创建')}catch(e){toast(e.message)}}}>新建分类</button>{categoryFilter!=='ALL'&&<button onClick={async()=>{if(!confirm('删除分类？书籍本身不会删除。'))return;await library.deleteCategory(categoryFilter);setCategoryFilter('ALL');toast('分类已删除')}}>删除分类</button>}</div>{books.length ? <div className="library-grid">{books.map(book => { const progress=library.progress.find(item=>item.bookId===book.id)?.percentage||0; return <article className="library-card card" key={book.id}><a href={`#/reader/${encodeURIComponent(book.id)}`}><Cover book={book}/></a><div><span>{bookStatusLabel(book.status)}</span><h3>{book.title}</h3><p>{book.author}</p><div className="library-progress"><i style={{width:`${progress*100}%`}}/></div><em>{Math.round(progress*100)}% · {book.format}</em><div className="card-actions"><a href={`#/reader/${encodeURIComponent(book.id)}`}>阅读</a><button onClick={()=>setEdit(book)}>编辑</button><button aria-label={`删除《${book.title}》`} onClick={()=>remove(book)}><Trash2 size={12}/></button></div></div></article>; })}</div> : <div className="empty"><BookOpen/><strong>没有符合条件的书</strong><span>更改筛选，或导入一本电子书。</span></div>}{library.deletedBooks.length>0&&<section className="trash-section"><h2>回收站</h2>{library.deletedBooks.map(book=>{const trash=library.trash.find(item=>item.entityId===book.id&&item.state==='TRASHED');return <div key={book.id}><span>《{book.title}》· 保留至 {new Date(trash?.expiresAt||book.deletedAt).toLocaleDateString('zh-CN')}</span><button disabled={!trash} onClick={async()=>{await library.restoreBook(trash.id);toast('书籍已恢复')}}>恢复</button></div>})}</section>}{edit && <BookEditDialog book={edit} library={library} close={()=>setEdit(null)} toast={toast}/>}</section>;
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [categoryFilter, setCategoryFilter] = useState('ALL');
+  const [sort, setSort] = useState('recent');
+  const [edit, setEdit] = useState(null);
+  const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(48);
+  const categories = useMemo(() => [...library.categories].sort((a, b) => (a.order || 0) - (b.order || 0) || a.name.localeCompare(b.name, 'zh-CN')), [library.categories]);
+  const categoryMap = useMemo(() => new Map(categories.map(category => [category.id, category])), [categories]);
+  const progressMap = useMemo(() => new Map(library.progress.map(item => [item.bookId, item.percentage || 0])), [library.progress]);
+  const categoryCounts = useMemo(() => {
+    const counts = new Map(categories.map(category => [category.id, 0]));
+    library.books.forEach(book => { const id = book.categoryIds?.[0]; if (counts.has(id)) counts.set(id, counts.get(id) + 1); });
+    return counts;
+  }, [categories, library.books]);
+  const books = useMemo(() => library.books
+    .filter(book => (statusFilter === 'ALL' || book.status === statusFilter) && (categoryFilter === 'ALL' || book.categoryIds?.[0] === categoryFilter))
+    .sort((a, b) => sort === 'title' ? a.title.localeCompare(b.title, 'zh-CN') : String(b.updatedAt).localeCompare(String(a.updatedAt))), [library.books, statusFilter, categoryFilter, sort]);
+  const visibleBooks = books.slice(0, visibleCount);
+  useEffect(() => { setVisibleCount(48); setSelectedIds(new Set()); setCategoryMenuOpen(false); setStatusMenuOpen(false); }, [statusFilter, categoryFilter, sort]);
+  useEffect(() => { if (categoryFilter !== 'ALL' && !categoryMap.has(categoryFilter)) setCategoryFilter('ALL'); }, [categoryFilter, categoryMap]);
+  const remove = async book => { if (!confirm(`将《${book.title}》移入回收站？默认保留笔记与划线。`)) return; await library.deleteBook(book.id, true); toast('已移入回收站'); };
+  const toggleSelected = id => setSelectedIds(current => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const setPrimaryCategory = async categoryId => {
+    if (!selectedIds.size) return;
+    try { setBatchBusy(true); const changed = await library.assignPrimaryCategory([...selectedIds], categoryId); const name = categoryMap.get(categoryId)?.name || '未分类'; toast(`${changed} 本书已设为“${name}”`); setSelectedIds(new Set()); setCategoryMenuOpen(false); }
+    catch (error) { toast(`归类失败：${error.message}`); }
+    finally { setBatchBusy(false); }
+  };
+  const setBatchStatus = async status => {
+    if (!selectedIds.size) return;
+    try { setBatchBusy(true); const changed = await library.updateBooksStatus([...selectedIds], status); toast(`${changed} 本书的阅读状态已更新`); setSelectedIds(new Set()); setStatusMenuOpen(false); }
+    catch (error) { toast(`更新失败：${error.message}`); }
+    finally { setBatchBusy(false); }
+  };
+  const selectAll = () => setSelectedIds(new Set(books.map(book => book.id)));
+  const clearSelection = () => setSelectedIds(new Set());
+  const exitSelection = () => { setSelectionMode(false); clearSelection(); setCategoryMenuOpen(false); setStatusMenuOpen(false); };
+  return <section className="module-page"><div className="module-heading module-heading-row"><div><span className="eyebrow">真实本地数据</span><h1>我的书架</h1><p>用状态和唯一主分类整理你的本地阅读空间。</p></div><button className="primary-action" onClick={openImport}><BookPlus size={16}/>导入电子书</button></div><section className="shelf-controls" aria-label="书架筛选与管理"><div className="shelf-filter-line"><span>阅读状态</span><div className="filter-chips" role="group" aria-label="阅读状态筛选"><button aria-pressed={statusFilter==='ALL'} className={statusFilter==='ALL'?'active':''} onClick={() => setStatusFilter('ALL')}>全部</button>{BOOK_STATUSES.map(item => <button key={item.value} aria-pressed={statusFilter===item.value} className={statusFilter===item.value?'active':''} onClick={() => setStatusFilter(item.value)}>{item.label}</button>)}</div></div><div className="shelf-filter-line"><span>主分类</span><div className="filter-chips category-filter-chips" role="group" aria-label="主分类筛选"><button aria-pressed={categoryFilter==='ALL'} className={categoryFilter==='ALL'?'active':''} onClick={() => setCategoryFilter('ALL')}>全部 <em>{library.books.length}</em></button>{categories.map(category => <button key={category.id} aria-pressed={categoryFilter===category.id} className={categoryFilter===category.id?'active':''} onClick={() => setCategoryFilter(category.id)}>{category.name} <em>{categoryCounts.get(category.id) || 0}</em></button>)}</div></div><div className="shelf-control-footer"><div className="filter-chips compact" role="group" aria-label="书架排序"><button aria-pressed={sort==='recent'} className={sort==='recent'?'active':''} onClick={() => setSort('recent')}>最近更新</button><button aria-pressed={sort==='title'} className={sort==='title'?'active':''} onClick={() => setSort('title')}>书名排序</button></div><div className="shelf-control-actions"><button onClick={() => setCategoryManagerOpen(true)}>管理分类</button><button aria-pressed={selectionMode} className={selectionMode?'active':''} onClick={() => selectionMode ? exitSelection() : setSelectionMode(true)}>{selectionMode ? '退出多选' : '多选归类'}</button></div></div></section><div className="shelf-result-bar" aria-live="polite"><span>{categoryFilter !== 'ALL' || statusFilter !== 'ALL' ? '已筛选 · ' : ''}共 {books.length} 本书</span>{(categoryFilter !== 'ALL' || statusFilter !== 'ALL') && <button onClick={() => { setCategoryFilter('ALL'); setStatusFilter('ALL'); }}>清除筛选</button>}</div>{selectionMode && <section className="batch-actions" aria-label="批量整理"><strong>已选择 {selectedIds.size} 本</strong><button disabled={batchBusy || !books.length} onClick={selectedIds.size === books.length ? clearSelection : selectAll}>{selectedIds.size === books.length ? '取消全选' : '全选筛选结果'}</button><div className="batch-menu"><button disabled={batchBusy || !selectedIds.size} aria-expanded={categoryMenuOpen} onClick={() => { setCategoryMenuOpen(value => !value); setStatusMenuOpen(false); }}>设为主分类</button>{categoryMenuOpen && <div role="menu" className="batch-popover"><button role="menuitem" onClick={() => setPrimaryCategory('')}>设为未分类</button>{categories.map(category => <button role="menuitem" key={category.id} onClick={() => setPrimaryCategory(category.id)}>{category.name}</button>)}</div>}</div><div className="batch-menu"><button disabled={batchBusy || !selectedIds.size} aria-expanded={statusMenuOpen} onClick={() => { setStatusMenuOpen(value => !value); setCategoryMenuOpen(false); }}>修改状态</button>{statusMenuOpen && <div role="menu" className="batch-popover">{BOOK_STATUSES.map(item => <button role="menuitem" key={item.value} onClick={() => setBatchStatus(item.value)}>{item.label}</button>)}</div>}</div><button disabled={batchBusy || !selectedIds.size} onClick={() => setPrimaryCategory('')}>移出分类</button><button onClick={exitSelection}>完成</button></section>}{books.length ? <><div className={`library-grid ${selectionMode ? 'selection-mode' : ''}`}>{visibleBooks.map(book => <LibraryBookCard key={book.id} book={book} progress={progressMap.get(book.id) || 0} categoryName={categoryMap.get(book.categoryIds?.[0])?.name || ''} selectionMode={selectionMode} selected={selectedIds.has(book.id)} onToggle={toggleSelected} onEdit={setEdit} onRemove={remove}/>)}</div>{books.length > visibleBooks.length && <div className="shelf-more"><button onClick={() => setVisibleCount(count => count + 48)}>显示更多（还有 {books.length - visibleBooks.length} 本）</button></div>}</> : <div className="empty"><BookOpen/><strong>没有符合条件的书</strong><span>更改筛选，或导入一本电子书。</span></div>}{library.deletedBooks.length > 0 && <section className="trash-section"><h2>回收站</h2>{library.deletedBooks.map(book => { const trash = library.trash.find(item => item.entityId === book.id && item.state === 'TRASHED'); return <div key={book.id}><span>《{book.title}》· 保留至 {new Date(trash?.expiresAt || book.deletedAt).toLocaleDateString('zh-CN')}</span><button disabled={!trash} onClick={async () => { await library.restoreBook(trash.id); toast('书籍已恢复'); }}>恢复</button></div>; })}</section>}{edit && <BookEditDialog book={edit} library={library} close={() => setEdit(null)} toast={toast}/>} {categoryManagerOpen && <CategoryManagerDialog library={library} close={() => setCategoryManagerOpen(false)} toast={toast}/>}</section>;
 }
 
 function NotesPage({ library, highlightsOnly=false, toast }) {
@@ -223,12 +323,31 @@ function highlightedText(text, highlights) {
   for(const range of ranges){if(range.start<cursor)continue;output.push(text.slice(cursor,range.start));output.push(<mark key={range.item.id} className={range.item.color?.toLowerCase()}>{text.slice(range.start,range.end)}</mark>);cursor=range.end}output.push(text.slice(cursor));return output;
 }
 
+function useBookContent(library, bookId) {
+  const [state, setState] = useState({ loading: true, error: '', files: [], sections: [] });
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, error: '', files: [], sections: [] });
+    library.loadBookContent(bookId)
+      .then(content => { if (!cancelled) setState({ loading: false, error: '', ...content }); })
+      .catch(error => { if (!cancelled) setState({ loading: false, error: error.message || '无法读取本书正文', files: [], sections: [] }); });
+    return () => { cancelled = true; };
+  }, [bookId, library.loadBookContent]);
+  return state;
+}
+
 function Reader({ book, library, prefs, toast, openNote }) {
-  const sections=useMemo(()=>library.sections.filter(item=>item.bookId===book.id).sort((a,b)=>a.order-b.order),[library.sections,book.id]);
+  const content = useBookContent(library, book.id);
+  if (content.loading) return <div className="reader-unavailable reader-loading"><LoaderCircle className="spin"/><h1>正在打开正文</h1><p>原文件与章节仅在打开此书时从本地读取。</p></div>;
+  if (content.error) return <div className="reader-unavailable"><FileText/><h1>无法读取正文</h1><p>{content.error}</p><a href="#/library">返回书架</a></div>;
+  return <ReaderContent book={book} library={library} prefs={prefs} toast={toast} openNote={openNote} sections={[...content.sections].sort((a,b) => a.order - b.order)} file={content.files.find(file => file.id === book.activeFileId) || content.files[0]}/>;
+}
+
+function ReaderContent({ book, library, prefs, toast, openNote, sections, file }) {
   const saved=library.progress.find(item=>item.bookId===book.id); const params=new URLSearchParams((location.hash.split('?')[1]||'')); const requested=params.get('section'); const requestedOffset=params.get('offset');
   const [order,setOrder]=useState(()=>Math.max(0,Math.min(sections.length-1,requested!==null?+requested:(saved?.locator?.sectionOrder||0))));
   const [panel,setPanel]=useState('toc'); const [annotationsOpen,setAnnotationsOpen]=useState(false); const [query,setQuery]=useState(''); const [selection,setSelection]=useState(null); const [selectedHighlight,setSelectedHighlight]=useState(null);
-  const lastActivity=useRef(Date.now()); const accountedThrough=useRef(lastActivity.current); const pendingSession=useRef({startedAt:0,seconds:0}); const sessionTimer=useRef(); const saveTimer=useRef(); const textRoot=useRef(); const current=sections[order]; const file=library.files.find(item=>item.bookId===book.id);
+  const lastActivity=useRef(Date.now()); const accountedThrough=useRef(lastActivity.current); const pendingSession=useRef({startedAt:0,seconds:0}); const sessionTimer=useRef(); const saveTimer=useRef(); const textRoot=useRef(); const current=sections[order];
   const results=useMemo(()=>query.trim()?sections.flatMap(section=>{const text=section.text||'';const i=text.toLocaleLowerCase().indexOf(query.trim().toLocaleLowerCase());return i>=0?[{section,offset:i,quote:text.slice(i,i+query.trim().length),preview:text.slice(Math.max(0,i-35),i+query.length+70)}]:[]}):[],[query,sections]);
   useEffect(()=>{library.updateBook(book.id,{lastOpenedAt:new Date().toISOString(),status:book.status==='WANT_TO_READ'?'READING':book.status}).catch(()=>{});},[book.id]);
   useEffect(()=>{const flush=()=>{const pending=pendingSession.current;const seconds=Math.floor(pending.seconds);if(seconds<1)return;pendingSession.current={startedAt:pending.startedAt+seconds*1000,seconds:pending.seconds-seconds};library.addSession(book.id,new Date(pending.startedAt).toISOString(),seconds).catch(()=>{})};const accountUntil=now=>{const end=Math.min(now,lastActivity.current+60000);const credited=creditedActivitySeconds(accountedThrough.current,end);if(credited>0){if(!pendingSession.current.startedAt)pendingSession.current.startedAt=accountedThrough.current;pendingSession.current.seconds+=credited;accountedThrough.current=end}};const onActivity=()=>{const now=Date.now();accountUntil(now);lastActivity.current=now;accountedThrough.current=now};const onVisibility=()=>{if(document.hidden){accountUntil(Date.now());flush()}else{lastActivity.current=Date.now();accountedThrough.current=lastActivity.current}};sessionTimer.current=setInterval(()=>{accountUntil(Date.now());flush()},5000);addEventListener('scroll',onActivity,{passive:true});addEventListener('keydown',onActivity);addEventListener('pointerdown',onActivity);document.addEventListener('visibilitychange',onVisibility);return()=>{accountUntil(Date.now());flush();clearInterval(sessionTimer.current);removeEventListener('scroll',onActivity);removeEventListener('keydown',onActivity);removeEventListener('pointerdown',onActivity);document.removeEventListener('visibilitychange',onVisibility)}},[book.id]);
@@ -260,7 +379,7 @@ function AppShell() {
   const readerBook=route.page==='reader'?library.books.find(book=>book.id===route.bookId):null;
   if(route.page==='reader')return readerBook?<><Reader book={readerBook} library={library} prefs={prefs} toast={toast} openNote={highlight=>{setNoteContext(highlight);setModal('note')}}/>{modal==='note'&&<NoteDialog library={library} bookId={readerBook.id} highlight={noteContext} close={()=>setModal('')} toast={toast}/>}<Toast message={toastMessage}/></>:<div className="reader-unavailable"><h1>找不到这本书</h1><a href="#/library">返回书架</a></div>;
   let page;if(route.page==='library')page=<LibraryPage library={library} openImport={()=>setModal('import')} toast={toast}/>;else if(route.page==='notes')page=<NotesPage library={library} toast={toast}/>;else if(route.page==='highlights')page=<NotesPage library={library} highlightsOnly toast={toast}/>;else if(route.page==='statistics')page=<StatisticsPage stats={stats}/>;else if(route.page==='settings')page=<SettingsPage library={library} prefs={prefs} setPrefs={setPrefs} toast={toast}/>;else page=<Dashboard library={library} stats={stats} openImport={()=>setModal('import')}/>;
-  return <div className="app"><Sidebar route={route} count={library.notes.length} menu={menu} close={()=>setMenu(false)}/><main className="app-main"><header><button className="menu-button" aria-label="打开导航菜单" aria-expanded={menu} onClick={()=>setMenu(true)}><Menu/></button><div className="search global-search"><Search size={18}/><input aria-label="全局业务搜索" value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索书名、作者、ISBN、笔记或标签"/>{query&&<button aria-label="清除搜索" onClick={()=>setQuery('')}><X size={14}/></button>}</div><div className="header-actions"><span className={`offline-badge ${offlineStatus==='ready'?'ready':''}`}>{offlineStatus==='ready'?'离线资源已缓存':offlineStatus==='preparing'?'离线资源准备中':'离线资源不可用'}</span><button className="import-button" aria-label="导入电子书" onClick={()=>setModal('import')}><Upload size={16}/><span>导入</span></button><button className="new-note" aria-label="新建笔记" onClick={()=>{setNoteContext(null);setModal('note')}}><Plus size={17}/><span>新建笔记</span></button></div></header><div className="content">{query&&<section className="search-results card"><div><strong>正在搜索：{query}</strong><button onClick={()=>setQuery('')}>清除</button></div>{search.books.map(book=><button key={book.id} onClick={()=>openBook(book)}>书籍 · {book.title} — {book.author}</button>)}{search.notes.map(note=><a key={note.id} href={`#/notes?focus=${encodeURIComponent(note.id)}`}>笔记 · {note.content.slice(0,80)}</a>)}{search.tags.map(tag=><a key={tag.id} href={`#/notes?tag=${encodeURIComponent(tag.id)}`}>标签 · #{tag.name}</a>)}{!search.books.length&&!search.notes.length&&!search.tags.length&&<p>没有业务数据匹配；全局搜索不检索正文。</p>}</section>}{page}<footer>拾页 · 本地优先的桌面阅读与深度笔记工具</footer></div></main>{menu&&<div className="menu-shade" onClick={()=>setMenu(false)}/>} {modal==='import'&&<ImportDialog library={library} close={()=>setModal('')} openBook={openBook} toast={toast}/>} {modal==='note'&&<NoteDialog library={library} highlight={noteContext} close={()=>setModal('')} toast={toast}/>}<Toast message={toastMessage}/></div>;
+  return <div className="app"><Sidebar route={route} count={library.notes.length} menu={menu} close={()=>setMenu(false)}/><main className="app-main">{library.migrationWarning&&<div className="migration-banner" role="alert"><strong>旧版数据未迁移</strong><span>{library.migrationWarning}；原数据已保留在浏览器，可正常导入新书。</span></div>}<header><button className="menu-button" aria-label="打开导航菜单" aria-expanded={menu} onClick={()=>setMenu(true)}><Menu/></button><div className="search global-search"><Search size={18}/><input aria-label="全局业务搜索" value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索书名、作者、ISBN、笔记或标签"/>{query&&<button aria-label="清除搜索" onClick={()=>setQuery('')}><X size={14}/></button>}</div><div className="header-actions"><span className={`offline-badge ${offlineStatus==='ready'?'ready':''}`}>{offlineStatus==='ready'?'离线资源已缓存':offlineStatus==='preparing'?'离线资源准备中':'离线资源不可用'}</span><button className="import-button" aria-label="导入电子书" onClick={()=>setModal('import')}><Upload size={16}/><span>导入</span></button><button className="new-note" aria-label="新建笔记" onClick={()=>{setNoteContext(null);setModal('note')}}><Plus size={17}/><span>新建笔记</span></button></div></header><div className="content">{query&&<section className="search-results card"><div><strong>正在搜索：{query}</strong><button onClick={()=>setQuery('')}>清除</button></div>{search.books.map(book=><button key={book.id} onClick={()=>openBook(book)}>书籍 · {book.title} — {book.author}</button>)}{search.notes.map(note=><a key={note.id} href={`#/notes?focus=${encodeURIComponent(note.id)}`}>笔记 · {note.content.slice(0,80)}</a>)}{search.tags.map(tag=><a key={tag.id} href={`#/notes?tag=${encodeURIComponent(tag.id)}`}>标签 · #{tag.name}</a>)}{!search.books.length&&!search.notes.length&&!search.tags.length&&<p>没有业务数据匹配；全局搜索不检索正文。</p>}</section>}{page}<footer>拾页 · 本地优先的桌面阅读与深度笔记工具</footer></div></main>{menu&&<div className="menu-shade" onClick={()=>setMenu(false)}/>} {modal==='import'&&<ImportDialog library={library} close={()=>setModal('')} openBook={openBook} toast={toast}/>} {modal==='note'&&<NoteDialog library={library} highlight={noteContext} close={()=>setModal('')} toast={toast}/>}<Toast message={toastMessage}/></div>;
 }
 
 export default AppShell;

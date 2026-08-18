@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  commitLegacyRescue, deleteCategoryAndUnassign, deleteRecord, getAllRecords, putMany, putProgressMonotonic,
-  putRecord, restoreTrashItem, softDeleteBook, softDeleteEntity, storageStatus,
+  commitLegacyRescue, deleteCategoryAndUnassign, deleteRecord, getAllRecords, getBookContent, putMany, putProgressMonotonic,
+  putRecord, restoreTrashItem, setBooksPrimaryCategory, setBooksStatus, softDeleteBook, softDeleteEntity, storageStatus,
 } from './db.js';
-import { activeRecords, buildLegacyRescueRecords, createId, normalizeBook, nowIso } from './domain.js';
+import { BOOK_STATUSES, activeRecords, buildLegacyRescueRecords, createId, normalizeBook, nowIso } from './domain.js';
 import { importPublication as commitPublication } from './services/importService.js';
 
-const DATA_STORES = ['books', 'files', 'sections', 'progress', 'notes', 'highlights', 'bookmarks', 'tags', 'categories', 'sessions', 'settings', 'trash', 'drafts'];
+// Shelf refreshes deliberately exclude raw files and parsed sections. Those large records are
+// fetched only by loadBookContent() when the reader opens a single book.
+const DATA_STORES = ['books', 'progress', 'notes', 'highlights', 'bookmarks', 'tags', 'categories', 'sessions', 'settings', 'trash', 'drafts'];
 const DEFAULT_CATEGORIES = ['文学与小说', '思想与哲学', '商业与经济', '自然与科学'];
 
 function parseLegacyArray(key) {
@@ -35,17 +37,31 @@ export function useLibrary() {
   const [data, setData] = useState(Object.fromEntries(DATA_STORES.map(name => [name, []])));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [migrationWarning, setMigrationWarning] = useState('');
   const [storage, setStorage] = useState({ usage: 0, quota: 0, persisted: false });
   const channelRef = useRef(null);
   const writeSuspendedRef = useRef(false);
+  const legacyMigrationRef = useRef({ attempted: false, warning: '' });
 
   const reload = useCallback(async () => {
+    // Migration can inspect old section keys, so run it at most once per page load.
+    // A damaged legacy payload remains a non-blocking warning rather than making
+    // every shelf filter/category refresh touch historical data again.
+    if (!legacyMigrationRef.current.attempted) {
+      try {
+        await migrateLegacyStorage();
+        legacyMigrationRef.current = { attempted: true, warning: '' };
+      } catch (reason) {
+        legacyMigrationRef.current = { attempted: true, warning: reason instanceof Error ? reason.message : '旧版数据迁移未完成' };
+      }
+    }
+    const migrationWarning = legacyMigrationRef.current.warning;
     try {
-      await migrateLegacyStorage();
       const values = await Promise.all(DATA_STORES.map(getAllRecords));
       setData(Object.fromEntries(DATA_STORES.map((name, index) => [name, values[index]])));
       setStorage(await storageStatus());
       setError('');
+      setMigrationWarning(migrationWarning);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '读取本地数据失败');
     } finally { setLoading(false); }
@@ -66,7 +82,7 @@ export function useLibrary() {
 
   const notify = useCallback(() => channelRef.current?.postMessage({ type: 'changed', at: Date.now() }), []);
   const assertWritable = useCallback(() => { if (writeSuspendedRef.current) throw new Error('另一标签页正在恢复备份，本标签页已暂停写入'); }, []);
-  const mutate = useCallback(async action => { assertWritable(); await action(); await reload(); notify(); }, [assertWritable, notify, reload]);
+  const mutate = useCallback(async action => { assertWritable(); const result = await action(); await reload(); notify(); return result; }, [assertWritable, notify, reload]);
   const runWithWriteBarrier = useCallback(async action => {
     if (writeSuspendedRef.current) throw new Error('已有备份恢复正在进行');
     writeSuspendedRef.current = true;
@@ -197,9 +213,28 @@ export function useLibrary() {
   const saveCategory = useCallback(async name => {
     const cleaned = String(name || '').trim().slice(0, 40); if (!cleaned) throw new Error('分类名不能为空');
     if (data.categories.some(item => item.name === cleaned)) throw new Error('分类已存在');
-    await mutate(() => putRecord('categories', { id: createId('category'), name: cleaned, order: data.categories.length, createdAt: nowIso() }));
+    const record = { id: createId('category'), name: cleaned, order: data.categories.length, createdAt: nowIso() };
+    await mutate(() => putRecord('categories', record));
+    return record;
+  }, [data.categories, mutate]);
+  const renameCategory = useCallback(async (id, name) => {
+    const cleaned = String(name || '').trim().slice(0, 40); if (!cleaned) throw new Error('分类名不能为空');
+    const current = data.categories.find(item => item.id === id); if (!current) throw new Error('分类不存在');
+    if (data.categories.some(item => item.id !== id && item.name === cleaned)) throw new Error('分类名已存在');
+    const record = { ...current, name: cleaned, updatedAt: nowIso() };
+    await mutate(() => putRecord('categories', record));
+    return record;
   }, [data.categories, mutate]);
   const deleteCategory = useCallback(async id => mutate(() => deleteCategoryAndUnassign(id, data.books)), [data.books, mutate]);
+  const assignPrimaryCategory = useCallback(async (bookIds, categoryId = '') => {
+    if (categoryId && !data.categories.some(item => item.id === categoryId)) throw new Error('分类不存在');
+    return mutate(() => setBooksPrimaryCategory(bookIds, categoryId));
+  }, [data.categories, mutate]);
+  const updateBooksStatus = useCallback(async (bookIds, status) => {
+    if (!BOOK_STATUSES.some(item => item.value === status)) throw new Error('阅读状态无效');
+    return mutate(() => setBooksStatus(bookIds, status));
+  }, [mutate]);
+  const loadBookContent = useCallback(async bookId => getBookContent(bookId), []);
 
   const active = useMemo(() => ({
     books: activeRecords(data.books), notes: activeRecords(data.notes), highlights: activeRecords(data.highlights), bookmarks: activeRecords(data.bookmarks), tags: activeRecords(data.tags),
@@ -211,8 +246,9 @@ export function useLibrary() {
     deletedNotes: data.notes.filter(item => item.deletedAt),
     deletedHighlights: data.highlights.filter(item => item.deletedAt),
     deletedBookmarks: data.bookmarks.filter(item => item.deletedAt),
-    loading, error, storage,
+    loading, error, migrationWarning, storage,
     reload, runWithWriteBarrier, importPublication, updateBook, deleteBook, restoreBook, recoverDuplicateBook, saveNote, deleteAnnotation, restoreAnnotation,
-    saveHighlight, saveBookmark, saveProgress, addSession, ensureTags, saveSetting, saveDraft, discardDraft, saveCategory, deleteCategory,
+    saveHighlight, saveBookmark, saveProgress, addSession, ensureTags, saveSetting, saveDraft, discardDraft,
+    saveCategory, renameCategory, deleteCategory, assignPrimaryCategory, updateBooksStatus, loadBookContent,
   };
 }

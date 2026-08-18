@@ -53,6 +53,23 @@ export function polishText(input) {
   return result;
 }
 
+/**
+ * Explain rule-based edits without pretending semantic understanding. The labels are
+ * intentionally broad so the UI can disclose the kind of local transformation only.
+ */
+export function describePolishChanges(input, output = polishText(input)) {
+  if (typeof input !== 'string' || !input.trim() || input === output) return [];
+  const changes = [];
+  const matchedReplacement = REPLACEMENTS.some(([pattern]) => {
+    const flags = pattern.flags.replace('g', '');
+    return new RegExp(pattern.source, flags).test(input);
+  });
+  if (matchedReplacement) changes.push('调整了口语措辞');
+  if (/\r|[ \t]{2,}|\n{3,}/.test(input)) changes.push('整理了空格与段落');
+  if (!/[。！？；…：”’）》】]\s*$/.test(input.trim()) || /，{2,}|，\s*[。！？；]|([!！]){2,}|([?？]){2,}/.test(input)) changes.push('整理了标点');
+  return changes.length ? changes : ['调整了表达细节'];
+}
+
 export function normalizeStoredNotes(value) {
   if (!Array.isArray(value)) return [];
   return value

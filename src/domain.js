@@ -40,7 +40,9 @@ export function normalizeBook(record = {}) {
     format: record.format || 'METADATA_ONLY',
     capability: record.capability || (record.contentPreview ? 'TEXT_ONLY' : 'METADATA_ONLY'),
     status: record.status || 'WANT_TO_READ',
-    categoryIds: Array.isArray(record.categoryIds) ? record.categoryIds : [],
+    // v1 shelf model has one optional primary category. Keep the array shape for
+    // backup compatibility, while enforcing a 0..1 cardinality at every write.
+    categoryIds: Array.isArray(record.categoryIds) ? record.categoryIds.filter(id => typeof id === 'string' && id).slice(0, 1) : [],
     progress: Math.max(0, Math.min(100, Number(record.progress) || 0)),
     // Remote covers are retained as metadata for compatibility, but never rendered automatically.
     coverUrl: typeof record.coverUrl === 'string' ? record.coverUrl : '',

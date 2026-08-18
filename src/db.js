@@ -94,6 +94,17 @@ export async function getAllRecords(storeName, { index, query } = {}) {
   return requestPromise(index ? store.index(index).getAll(query) : store.getAll(query));
 }
 
+/** Read large reading payload only when a reader is opened, never during shelf refreshes. */
+export async function getBookContent(bookId) {
+  const database = await openDatabase();
+  const transaction = database.transaction(['files', 'sections'], 'readonly');
+  const files = requestPromise(transaction.objectStore('files').index('bookId').getAll(bookId));
+  const sections = requestPromise(transaction.objectStore('sections').index('bookId').getAll(bookId));
+  const [fileRecords, sectionRecords] = await Promise.all([files, sections]);
+  await transactionPromise(transaction);
+  return { files: fileRecords, sections: sectionRecords };
+}
+
 export async function putRecord(storeName, record) {
   const database = await openDatabase();
   const transaction = database.transaction(storeName, 'readwrite');
@@ -174,9 +185,49 @@ export async function deleteCategoryAndUnassign(categoryId, books) {
   const database = await openDatabase();
   const transaction = database.transaction(['categories', 'books'], 'readwrite');
   transaction.objectStore('categories').delete(categoryId);
+  const affected = books.filter(item => item.categoryIds?.includes(categoryId));
   const now = new Date().toISOString();
-  for (const book of books.filter(item => item.categoryIds?.includes(categoryId))) transaction.objectStore('books').put({ ...book, categoryIds: book.categoryIds.filter(id => id !== categoryId), revision: (book.revision || 0) + 1, updatedAt: now });
+  for (const book of affected) transaction.objectStore('books').put({ ...book, categoryIds: [], revision: (book.revision || 0) + 1, updatedAt: now });
   await transactionPromise(transaction);
+  return affected.length;
+}
+
+/** Atomically enforce the one-primary-category invariant for a batch of books. */
+export async function setBooksPrimaryCategory(bookIds, categoryId = '') {
+  const uniqueIds = [...new Set(bookIds)].filter(Boolean);
+  if (!uniqueIds.length) return 0;
+  const database = await openDatabase();
+  const transaction = database.transaction('books', 'readwrite');
+  const store = transaction.objectStore('books');
+  const records = await Promise.all(uniqueIds.map(id => requestPromise(store.get(id))));
+  const now = new Date().toISOString();
+  let changed = 0;
+  for (const book of records.filter(Boolean)) {
+    const nextCategoryIds = categoryId ? [categoryId] : [];
+    if (JSON.stringify(book.categoryIds || []) === JSON.stringify(nextCategoryIds)) continue;
+    store.put({ ...book, categoryIds: nextCategoryIds, revision: (book.revision || 0) + 1, updatedAt: now });
+    changed += 1;
+  }
+  await transactionPromise(transaction);
+  return changed;
+}
+
+export async function setBooksStatus(bookIds, status) {
+  const uniqueIds = [...new Set(bookIds)].filter(Boolean);
+  if (!uniqueIds.length) return 0;
+  const database = await openDatabase();
+  const transaction = database.transaction('books', 'readwrite');
+  const store = transaction.objectStore('books');
+  const records = await Promise.all(uniqueIds.map(id => requestPromise(store.get(id))));
+  const now = new Date().toISOString();
+  let changed = 0;
+  for (const book of records.filter(Boolean)) {
+    if (book.status === status) continue;
+    store.put({ ...book, status, revision: (book.revision || 0) + 1, updatedAt: now });
+    changed += 1;
+  }
+  await transactionPromise(transaction);
+  return changed;
 }
 
 export async function softDeleteBook(book, related = {}) {

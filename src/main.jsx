@@ -4,7 +4,10 @@ import App from './App.jsx';
 import './styles.css';
 
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(error => console.warn('Service Worker 注册失败', error)));
+  window.addEventListener('load', () => {
+    const scope = import.meta.env.BASE_URL;
+    navigator.serviceWorker.register(`${scope}sw.js`, { scope }).catch(error => console.warn('Service Worker 注册失败', error));
+  });
 }
 
 class ErrorBoundary extends React.Component {

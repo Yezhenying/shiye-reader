@@ -2,12 +2,12 @@
   "name": "拾页 · 本地阅读与深度笔记",
   "short_name": "拾页",
   "description": "本地优先的桌面电子书阅读与深度笔记工具",
-  "start_url": "/#/",
-  "scope": "/",
+  "start_url": "./#/",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#f8f6f0",
   "theme_color": "#68766a",
   "icons": [
-    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]
 }

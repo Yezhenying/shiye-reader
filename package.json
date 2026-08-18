@@ -1,5 +1,5 @@
 {
-  "name": "reading-notes-demo",
+  "name": "shiye-reader",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,8 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/textPolish.test.js && node tests/bookUtils.test.js && node tests/domain.test.js && node tests/db.test.js && node tests/backup.test.js && node tests/ebookParser.test.js",
-    "check": "npm run test && npm run build"
+    "test": "node tests/textPolish.test.js && node tests/bookUtils.test.js && node tests/domain.test.js && node tests/db.test.js && node tests/backup.test.js && node tests/ebookParser.test.js && node tests/library-category.integration.test.js && node tests/import.integration.test.js",
+    "test:pages": "node tests/pages-build.test.mjs",
+    "test:e2e": "node tests/import.e2e.test.js && node tests/import-formats.e2e.test.js && node tests/migration.e2e.test.js && node tests/category-polish.e2e.test.js && node tests/shelf-performance.e2e.test.js",
+    "generate:fixtures": "node tests/generate-fixtures.mjs",
+    "check": "npm run test && npm run test:pages && npm run build"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -18,5 +21,9 @@
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
+    "playwright-core": "^1.62.1"
   }
 }

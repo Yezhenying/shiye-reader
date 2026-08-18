@@ -22,6 +22,7 @@ const preserved = normalizeBook({ id: 'b', title: '书', fingerprint: 'abc', act
 assert.equal(preserved.fingerprint, 'abc');
 assert.equal(preserved.activeFileId, 'f');
 assert.equal(preserved.toc.length, 1);
+assert.deepEqual(normalizeBook({ categoryIds: ['primary', 'legacy-extra'] }).categoryIds, ['primary']);
 assert.equal(calculateProgress(sections, buildLocator({ id: 'pdf', format: 'PDF' }, sections[1], 0, { pageProgression: 0.5 })), 0.75);
 assert.equal(creditedActivitySeconds(0, 125000), 60);
 const midnight = new Date(); midnight.setHours(23, 59, 30, 0);
@@ -34,4 +35,4 @@ assert.equal(calculateStatistics({ books: [], notes: [], highlights: [], session
 const legacy = buildLegacyRescueRecords([{ id: 'same', title: '旧书', contentPreview: '正文' }], [{ id: 'note', bookId: 'same', note: '想法' }], '2020-01-01T00:00:00.000Z');
 assert.equal(legacy.sections[0].id, 'section-same-0');
 assert.equal(buildLegacyRescueRecords([{ id: 'same', title: '旧书', contentPreview: '正文' }], [], '2020-01-01T00:00:00.000Z').sections[0].id, legacy.sections[0].id);
-console.log('domain: 21 assertions passed');
+console.log('domain: 22 assertions passed');
