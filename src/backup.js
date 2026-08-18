@@ -189,6 +189,17 @@ function validateBinaryOwnership(snapshot, manifest) {
   if (binaryPaths.some(path => !referenced.has(path))) throw new Error('备份包含没有业务记录归属的二进制条目');
 }
 
+function createLightSnapshot(snapshot) {
+  return {
+    ...snapshot,
+    books: snapshot.books.map(({ coverBlob, ...book }) => ({
+      ...book, activeFileId: '', sourceMissing: true,
+      parseStatus: '轻量备份不含原文件与正文；恢复后请重新导入原文件',
+    })),
+    files: [], sections: [],
+  };
+}
+
 export async function createFullBackup({ download = true } = {}) {
   const snapshot = await exportDatabaseSnapshot();
   const stores = Object.fromEntries(STORE_NAMES.map(name => [name, snapshot[name]?.length || 0]));
@@ -223,6 +234,23 @@ export async function createFullBackup({ download = true } = {}) {
   const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
   await inspectBackup(blob);
   if (download) downloadBlob(blob, `拾页当前版本完整快照-${new Date().toISOString().slice(0, 10)}.zip`);
+  return { blob, manifest };
+}
+
+/** Export metadata and reading records without covers, original files, or derived sections. */
+export async function createLightBackup({ download = true } = {}) {
+  const snapshot = createLightSnapshot(await exportDatabaseSnapshot());
+  const stores = Object.fromEntries(STORE_NAMES.map(name => [name, snapshot[name]?.length || 0]));
+  validateSnapshot(snapshot, { stores });
+  const dataJson = JSON.stringify(snapshot); const dataPath = 'data/snapshot.json';
+  const manifest = {
+    product: '拾页', schemaVersion: BACKUP_SCHEMA_VERSION, createdAt: new Date().toISOString(), mode: 'LIGHT', stores,
+    entries: [{ path: dataPath, size: new Blob([dataJson]).size, checksum: await sha256(dataJson), mimeType: 'application/json', ownerStore: 'snapshot', ownerId: 'current' }],
+  };
+  const zip = new JSZip(); zip.file(dataPath, dataJson); zip.file('manifest.json', JSON.stringify(manifest, null, 2));
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+  await inspectBackup(blob);
+  if (download) downloadBlob(blob, `拾页轻量数据备份-${new Date().toISOString().slice(0, 10)}.zip`);
   return { blob, manifest };
 }
 
@@ -284,4 +312,4 @@ export async function restoreFullBackup(file) {
   return manifest;
 }
 
-export const backupTestUtils = { bytesToHex, validateSnapshot, validateBinaryOwnership, normalizeBackupVersion };
+export const backupTestUtils = { bytesToHex, validateSnapshot, validateBinaryOwnership, normalizeBackupVersion, createLightSnapshot };

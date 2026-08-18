@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
 import {
-  deleteCategoryAndUnassign, getAllRecords, getBookContent, openDatabase, putRecord,
-  setBooksPrimaryCategory, setBooksStatus,
+  deleteCategoryAndUnassign, getAllRecords, getBookContent, getTrashImpact, openDatabase, permanentlyDeleteTrashItem, putRecord, purgeExpiredTrash,
+  setBooksPrimaryCategory, setBooksStatus, softDeleteBook, softDeleteEntity,
 } from '../src/db.js';
 
 async function resetDb() {
@@ -45,7 +45,30 @@ async function main() {
   assert.ok(books.every(book => book.categoryIds.length === 0));
   assert.equal((await getAllRecords('categories')).length, 1, '只删除目标分类');
 
-  console.log('library.category integration: 10 assertions passed');
+  await putRecord('progress', { bookId: 'one', percentage: 0.2 });
+  await putRecord('bookmarks', { id: 'bookmark-one', bookId: 'one' });
+  await putRecord('sessions', { id: 'session-one', bookId: 'one' });
+  await putRecord('notes', { id: 'note-one', bookId: 'one' });
+  await putRecord('highlights', { id: 'highlight-one', bookId: 'one' });
+  const one = (await getAllRecords('books')).find(book => book.id === 'one');
+  const trashId = await softDeleteBook(one, { keepAnnotations: false, notes: [{ id: 'note-one', bookId: 'one' }], highlights: [{ id: 'highlight-one', bookId: 'one' }], bookmarks: [{ id: 'bookmark-one', bookId: 'one' }] });
+  const impact = await getTrashImpact(trashId);
+  assert.equal(impact.files, 1, '彻底删除前应统计原文件');
+  assert.equal(impact.sections, 1, '彻底删除前应统计章节');
+  assert.equal(impact.notes, 1, '彻底删除前应统计随书删除的笔记');
+  assert.equal(impact.total, 8, '应统计书籍及其依赖记录');
+  await permanentlyDeleteTrashItem(trashId);
+  assert.equal((await getAllRecords('books')).some(book => book.id === 'one'), false);
+  assert.equal((await getAllRecords('files')).some(file => file.bookId === 'one'), false);
+  assert.equal((await getAllRecords('notes')).some(note => note.id === 'note-one'), false);
+
+  await putRecord('notes', { id: 'expired-note', content: '过期', revision: 1 });
+  const expiredTrashId = await softDeleteEntity('notes', { id: 'expired-note', content: '过期', revision: 1 });
+  await putRecord('trash', { id: expiredTrashId, entityType: 'NOTES', entityId: 'expired-note', storeName: 'notes', state: 'TRASHED', expiresAt: '2000-01-01T00:00:00.000Z' });
+  assert.equal((await purgeExpiredTrash()).length, 1, '应自动清理已到期的回收站记录');
+  assert.equal((await getAllRecords('notes')).some(note => note.id === 'expired-note'), false);
+
+  console.log('library.category integration: 19 assertions passed');
 }
 
 main().catch(error => { console.error('CATEGORY TEST FAILED:', error); process.exit(1); });

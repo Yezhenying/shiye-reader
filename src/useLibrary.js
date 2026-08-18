@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  commitLegacyRescue, deleteCategoryAndUnassign, deleteRecord, getAllRecords, getBookContent, putMany, putProgressMonotonic,
+  commitLegacyRescue, deleteCategoryAndUnassign, deleteRecord, getAllRecords, getBookContent, getTrashImpact, permanentlyDeleteTrashItem, purgeExpiredTrash, putMany, putProgressMonotonic,
   putRecord, restoreTrashItem, setBooksPrimaryCategory, setBooksStatus, softDeleteBook, softDeleteEntity, storageStatus,
 } from './db.js';
 import { BOOK_STATUSES, activeRecords, buildLegacyRescueRecords, createId, normalizeBook, nowIso } from './domain.js';
@@ -57,6 +57,7 @@ export function useLibrary() {
     }
     const migrationWarning = legacyMigrationRef.current.warning;
     try {
+      await purgeExpiredTrash();
       const values = await Promise.all(DATA_STORES.map(getAllRecords));
       setData(Object.fromEntries(DATA_STORES.map((name, index) => [name, values[index]])));
       setStorage(await storageStatus());
@@ -123,6 +124,8 @@ export function useLibrary() {
   }, [data, mutate]);
 
   const restoreBook = useCallback(async trashId => mutate(() => restoreTrashItem(trashId)), [mutate]);
+  const inspectTrash = useCallback(async trashId => getTrashImpact(trashId), []);
+  const permanentlyDeleteTrash = useCallback(async trashId => mutate(() => permanentlyDeleteTrashItem(trashId)), [mutate]);
   const recoverDuplicateBook = useCallback(async book => {
     const trashItem = data.trash.find(item => item.entityId === book.id && item.state === 'TRASHED');
     if (!trashItem) throw new Error('未找到可恢复的回收站记录');
@@ -247,7 +250,7 @@ export function useLibrary() {
     deletedHighlights: data.highlights.filter(item => item.deletedAt),
     deletedBookmarks: data.bookmarks.filter(item => item.deletedAt),
     loading, error, migrationWarning, storage,
-    reload, runWithWriteBarrier, importPublication, updateBook, deleteBook, restoreBook, recoverDuplicateBook, saveNote, deleteAnnotation, restoreAnnotation,
+    reload, runWithWriteBarrier, importPublication, updateBook, deleteBook, restoreBook, inspectTrash, permanentlyDeleteTrash, recoverDuplicateBook, saveNote, deleteAnnotation, restoreAnnotation,
     saveHighlight, saveBookmark, saveProgress, addSession, ensureTags, saveSetting, saveDraft, discardDraft,
     saveCategory, renameCategory, deleteCategory, assignPrimaryCategory, updateBooksStatus, loadBookContent,
   };

@@ -259,6 +259,64 @@ export async function softDeleteEntity(storeName, record) {
   return trashId;
 }
 
+export async function getTrashImpact(trashId) {
+  const trash = await getRecord('trash', trashId);
+  if (!trash || trash.state !== 'TRASHED') throw new Error('回收站项目不存在或已恢复');
+  if (trash.storeName) return { trashId, entityType: trash.entityType, [trash.storeName]: 1, total: 1 };
+  const [files, sections, progress, bookmarks, notes, highlights, sessions] = await Promise.all(
+    ['files', 'sections', 'progress', 'bookmarks', 'notes', 'highlights', 'sessions'].map(getAllRecords),
+  );
+  const forBook = records => records.filter(record => record.bookId === trash.entityId).length;
+  const relatedDeleted = records => records.filter(record => record.trashGenerationId === trashId).length;
+  const impact = {
+    trashId, entityType: trash.entityType, books: 1, files: forBook(files), sections: forBook(sections),
+    progress: progress.some(record => record.bookId === trash.entityId) ? 1 : 0,
+    bookmarks: forBook(bookmarks), notes: relatedDeleted(notes), highlights: relatedDeleted(highlights), sessions: forBook(sessions),
+  };
+  impact.total = Object.entries(impact).filter(([key]) => !['trashId', 'entityType', 'total'].includes(key)).reduce((sum, [, value]) => sum + value, 0);
+  return impact;
+}
+
+/** Permanently remove one trashed entity and every dependent record in a single transaction. */
+export async function permanentlyDeleteTrashItem(trashId) {
+  const trash = await getRecord('trash', trashId);
+  const impact = await getTrashImpact(trashId);
+  if (trash.storeName) {
+    const database = await openDatabase();
+    const transaction = database.transaction([trash.storeName, 'trash'], 'readwrite');
+    transaction.objectStore(trash.storeName).delete(trash.entityId);
+    transaction.objectStore('trash').delete(trashId);
+    await transactionPromise(transaction);
+    return impact;
+  }
+  const [files, sections, bookmarks, notes, highlights, sessions] = await Promise.all(
+    ['files', 'sections', 'bookmarks', 'notes', 'highlights', 'sessions'].map(getAllRecords),
+  );
+  const database = await openDatabase();
+  const stores = ['books', 'files', 'sections', 'progress', 'bookmarks', 'notes', 'highlights', 'sessions', 'trash'];
+  const transaction = database.transaction(stores, 'readwrite');
+  transaction.objectStore('books').delete(trash.entityId);
+  transaction.objectStore('progress').delete(trash.entityId);
+  const deleteForBook = (storeName, records) => records.filter(record => record.bookId === trash.entityId).forEach(record => transaction.objectStore(storeName).delete(record.id));
+  deleteForBook('files', files); deleteForBook('sections', sections); deleteForBook('bookmarks', bookmarks); deleteForBook('sessions', sessions);
+  for (const storeName of ['notes', 'highlights']) {
+    const records = storeName === 'notes' ? notes : highlights;
+    records.filter(record => record.trashGenerationId === trashId).forEach(record => transaction.objectStore(storeName).delete(record.id));
+  }
+  transaction.objectStore('trash').delete(trashId);
+  await transactionPromise(transaction);
+  return impact;
+}
+
+/** Remove expired, still-trashed entries. Restored entries are never touched. */
+export async function purgeExpiredTrash(now = Date.now()) {
+  const entries = await getAllRecords('trash');
+  const expired = entries.filter(entry => entry.state === 'TRASHED' && Number.isFinite(Date.parse(entry.expiresAt)) && Date.parse(entry.expiresAt) <= now);
+  const impacts = [];
+  for (const entry of expired) impacts.push(await permanentlyDeleteTrashItem(entry.id));
+  return impacts;
+}
+
 export async function restoreTrashItem(trashId) {
   const trash = await getRecord('trash', trashId);
   if (!trash || trash.state !== 'TRASHED') throw new Error('回收站项目不存在或已恢复');

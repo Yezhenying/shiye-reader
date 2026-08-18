@@ -22,4 +22,10 @@ assert.equal(backupTestUtils.validateBinaryOwnership(relationalSnapshot, relatio
 assert.throws(() => backupTestUtils.validateBinaryOwnership(relationalSnapshot, { ...relationalManifest, entries: [relationalManifest.entries[0], { path: 'files/f/original.bin', ownerStore: 'books', ownerId: 'b' }] }), /所有权无效/);
 assert.throws(() => backupTestUtils.validateSnapshot({ ...relationalSnapshot, progress: [{ bookId: 'b', percentage: 2, locator: validLocator, revision: 1, updatedAt: timestamp }] }, relationalManifest), /百分比无效/);
 assert.throws(() => backupTestUtils.validateSnapshot({ ...relationalSnapshot, books: [{ ...validBook, title: { malicious: true } }] }, relationalManifest), /书名.*无效/);
-console.log('backup: 12 assertions passed');
+const lightSnapshot = backupTestUtils.createLightSnapshot({ ...relationalSnapshot, books: [{ ...validBook, coverBlob: new Blob(['cover']) }] });
+assert.deepEqual(lightSnapshot.files, []);
+assert.deepEqual(lightSnapshot.sections, []);
+assert.equal(lightSnapshot.books[0].activeFileId, '');
+assert.equal(lightSnapshot.books[0].sourceMissing, true);
+assert.equal(backupTestUtils.validateSnapshot(lightSnapshot, { stores: Object.fromEntries(STORE_NAMES.map(name => [name, lightSnapshot[name].length])) }), true);
+console.log('backup: 17 assertions passed');
